@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "PTAM2 desktop permissions",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}

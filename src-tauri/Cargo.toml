@@ -1,0 +1,30 @@
+[package]
+name = "ptam2"
+version = "2.0.0"
+description = "Fast native texture atlas merger"
+authors = ["loyal37"]
+edition = "2024"
+
+[lib]
+name = "ptam2_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+base64 = "0.22.1"
+ddsfile = "=0.5.2"
+image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "jpeg", "png", "tga", "tiff", "webp"] }
+image_dds = "0.7.2"
+rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-window-state = "2.4.1"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
