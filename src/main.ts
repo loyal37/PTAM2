@@ -296,7 +296,7 @@ function invalidatePreview(): void {
   renderPreview();
 }
 
-function buildOptions() {
+function buildOptions(includeAssignments = true) {
   let canvasWidth: number | null = null;
   let canvasHeight: number | null = null;
   if (state.settings.canvasMode === "custom") {
@@ -312,7 +312,9 @@ function buildOptions() {
     columns: state.settings.columns,
     canvasWidth,
     canvasHeight,
-    assignments: Array.from(state.assignments, ([textureId, slot]) => ({ textureId, slot })),
+    assignments: includeAssignments
+      ? Array.from(state.assignments, ([textureId, slot]) => ({ textureId, slot }))
+      : [],
   };
 }
 
@@ -429,10 +431,47 @@ function renderSlots(): void {
     const width = grid.slotWidth / preview.width * 100;
     const height = grid.slotHeight / preview.height * 100;
     cells.push(`<div class="slot-cell ${texture ? "occupied" : ""}" data-slot="${slot}" draggable="${Boolean(texture)}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%">
+      ${texture ? `<img class="slot-texture-preview" src="${texture.thumbnailDataUrl}" alt="" draggable="false" />` : ""}
       <span>${slot}</span>${texture ? `<strong>${escapeHtml(texture.name)}</strong>` : ""}
     </div>`);
   }
   slotOverlay.innerHTML = cells.join("");
+}
+
+function textureAtSlot(slot: number): TextureInfo | null {
+  for (const [textureId, assignedSlot] of state.assignments) {
+    if (assignedSlot !== slot) continue;
+    return state.textures.find((texture) => texture.id === textureId) ?? null;
+  }
+  return null;
+}
+
+function updateSlotCell(slot: number): void {
+  const cell = slotOverlay.querySelector<HTMLElement>(`.slot-cell[data-slot="${slot}"]`);
+  if (!cell) return;
+  const texture = textureAtSlot(slot);
+  cell.classList.toggle("occupied", Boolean(texture));
+  cell.draggable = Boolean(texture);
+  cell.innerHTML = `${texture ? `<img class="slot-texture-preview" src="${texture.thumbnailDataUrl}" alt="" draggable="false" />` : ""}
+    <span>${slot}</span>${texture ? `<strong>${escapeHtml(texture.name)}</strong>` : ""}`;
+}
+
+function updateTextureSlotBadge(textureId: number): void {
+  const item = textureList.querySelector<HTMLElement>(`.texture-item[data-id="${textureId}"]`);
+  if (!item) return;
+  item.querySelector(".slot-pill")?.remove();
+  const slot = state.assignments.get(textureId);
+  if (!slot) return;
+  const badge = document.createElement("span");
+  badge.className = "slot-pill";
+  badge.textContent = `槽 ${slot}`;
+  item.append(badge);
+}
+
+function updateAssignmentUi(textureIds: Array<number | undefined>, slots: Array<number | undefined>): void {
+  new Set(textureIds.filter((id): id is number => id !== undefined)).forEach(updateTextureSlotBadge);
+  new Set(slots.filter((slot): slot is number => slot !== undefined)).forEach(updateSlotCell);
+  renderSlotSummary();
 }
 
 function updateButtonState(): void {
@@ -475,7 +514,9 @@ async function generatePreview(silent = false): Promise<void> {
   if (state.textures.length === 0 && !state.base) return;
   setBusy(true, "Rust 引擎正在生成预览");
   try {
-    state.preview = await invoke<PreviewResponse>("build_preview", { options: buildOptions() });
+    // Base mode is composited instantly in the webview. Keep the Rust preview
+    // assignment-free so moving a texture never leaves stale pixels behind.
+    state.preview = await invoke<PreviewResponse>("build_preview", { options: buildOptions(!state.base) });
     renderPreview();
     if (!silent) toast(`预览已生成：${state.preview.width} × ${state.preview.height}`, "success");
   } catch (error) {
@@ -591,17 +632,21 @@ function autoPlace(): void {
   state.textures.forEach((texture, index) => state.assignments.set(texture.id, index + 1));
   renderTextures();
   renderSlotSummary();
-  void generatePreview(true);
+  renderSlots();
 }
 
 function assignTexture(textureId: number, targetSlot: number): void {
+  const previousSlot = state.assignments.get(textureId);
+  let displacedTextureId: number | undefined;
   for (const [id, slot] of state.assignments) {
-    if (slot === targetSlot && id !== textureId) state.assignments.delete(id);
+    if (slot === targetSlot && id !== textureId) {
+      displacedTextureId = id;
+      state.assignments.delete(id);
+      break;
+    }
   }
   state.assignments.set(textureId, targetSlot);
-  renderTextures();
-  renderSlotSummary();
-  void generatePreview(true);
+  updateAssignmentUi([textureId, displacedTextureId], [previousSlot, targetSlot]);
 }
 
 function moveSlot(sourceSlot: number, targetSlot: number): void {
@@ -611,9 +656,7 @@ function moveSlot(sourceSlot: number, targetSlot: number): void {
   const target = Array.from(state.assignments).find(([, slot]) => slot === targetSlot);
   state.assignments.set(source[0], targetSlot);
   if (target) state.assignments.set(target[0], sourceSlot);
-  renderTextures();
-  renderSlotSummary();
-  void generatePreview(true);
+  updateAssignmentUi([source[0], target?.[0]], [sourceSlot, targetSlot]);
 }
 
 function showResizeDialog(): void {

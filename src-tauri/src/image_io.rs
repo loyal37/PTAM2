@@ -66,7 +66,10 @@ pub fn texture_info(asset: &TextureAsset) -> AppResult<TextureInfo> {
         width: asset.image.width(),
         height: asset.image.height(),
         format: asset.format.clone(),
-        thumbnail_data_url: image_data_url(&asset.image, 112)?,
+        // This data URL is also used by the zero-latency slot compositor in
+        // the webview, so keep enough detail for the canvas rather than only
+        // sizing it for the 40px list thumbnail.
+        thumbnail_data_url: image_data_url(&asset.image, 256)?,
     })
 }
 
