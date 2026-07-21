@@ -167,6 +167,7 @@ button:disabled { opacity: .35; cursor: default; }
 .texture-item.selected { background: rgba(50, 138, 191, .18); border-color: rgba(75, 190, 225, .28); }
 .texture-item[draggable="true"] { cursor: grab; }
 .texture-item[draggable="true"]:active { cursor: grabbing; }
+.texture-item.dragging { opacity: .48; border-color: rgba(245, 200, 107, .55); }
 .texture-item img { width: 40px; height: 40px; object-fit: contain; border-radius: 5px; background-color: #111a22; background-image: linear-gradient(45deg, #1c2a33 25%, transparent 25%), linear-gradient(-45deg, #1c2a33 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #1c2a33 75%), linear-gradient(-45deg, transparent 75%, #1c2a33 75%); background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0; }
 .texture-index { color: #536f84; font-size: 9px; font-variant-numeric: tabular-nums; }
 .texture-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
@@ -252,6 +253,7 @@ input[type="range"] { accent-color: #48c4df; }
 .slot-cell > span { position: absolute; left: 5px; top: 4px; display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; background: rgba(2, 9, 15, .65); color: #f1f8fc; font-size: 8px; }
 .slot-cell strong { position: absolute; left: 5px; right: 5px; bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 5px; border-radius: 4px; background: rgba(4, 14, 22, .78); color: #bff4dc; font-size: 8px; }
 .slot-cell.occupied { border: 2px solid rgba(72, 224, 160, .87); background: rgba(48, 185, 125, .07); cursor: grab; }
+.slot-cell.dragging { opacity: .48; }
 .slot-cell.drag-over { z-index: 3; border: 3px solid var(--amber); background: rgba(245, 200, 107, .22); box-shadow: 0 0 25px rgba(245, 200, 107, .25); }
 
 .busy-overlay { position: absolute; z-index: 10; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; background: rgba(3, 10, 18, .72); backdrop-filter: blur(4px); color: #bcd1df; font-size: 11px; }

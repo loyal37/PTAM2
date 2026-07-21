@@ -118,6 +118,12 @@ const state = {
   busy: false,
 };
 
+type ActiveDrag =
+  | { kind: "texture"; textureId: number }
+  | { kind: "slot"; sourceSlot: number };
+
+let activeDrag: ActiveDrag | null = null;
+
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div class="background-art" id="background-art"></div>
   <main class="app-shell">
@@ -499,6 +505,7 @@ async function chooseTextures(): Promise<void> {
     if (response.errors.length) {
       toast(response.errors.map((item) => `${item.path}: ${item.message}`).join("\n"), "error", 8000);
     }
+    if (state.base && response.textures.length) await generatePreview(true);
   } catch (error) {
     toast(errorText(error), "error");
   } finally {
@@ -763,19 +770,43 @@ function wireEvents(): void {
   textureList.addEventListener("dragstart", (event) => {
     const item = (event.target as HTMLElement).closest<HTMLElement>(".texture-item");
     if (!item || !event.dataTransfer) return;
-    event.dataTransfer.setData("application/x-ptam-texture", item.dataset.id ?? "");
+    const textureId = Number(item.dataset.id);
+    if (!textureId) return;
+    activeDrag = { kind: "texture", textureId };
+    item.classList.add("dragging");
+    event.dataTransfer.setData("application/x-ptam-texture", String(textureId));
+    event.dataTransfer.setData("text/plain", `ptam-texture:${textureId}`);
     event.dataTransfer.effectAllowed = "move";
+  });
+  textureList.addEventListener("dragend", (event) => {
+    (event.target as HTMLElement).closest<HTMLElement>(".texture-item")?.classList.remove("dragging");
+    activeDrag = null;
+    slotOverlay.querySelectorAll(".drag-over").forEach((element) => element.classList.remove("drag-over"));
   });
   slotOverlay.addEventListener("dragstart", (event) => {
     const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell.occupied");
     if (!cell || !event.dataTransfer) return;
-    event.dataTransfer.setData("application/x-ptam-slot", cell.dataset.slot ?? "");
+    const sourceSlot = Number(cell.dataset.slot);
+    if (!sourceSlot) return;
+    activeDrag = { kind: "slot", sourceSlot };
+    cell.classList.add("dragging");
+    event.dataTransfer.setData("application/x-ptam-slot", String(sourceSlot));
+    event.dataTransfer.setData("text/plain", `ptam-slot:${sourceSlot}`);
     event.dataTransfer.effectAllowed = "move";
+  });
+  slotOverlay.addEventListener("dragend", (event) => {
+    (event.target as HTMLElement).closest<HTMLElement>(".slot-cell")?.classList.remove("dragging");
+    activeDrag = null;
+    slotOverlay.querySelectorAll(".drag-over").forEach((element) => element.classList.remove("drag-over"));
   });
   slotOverlay.addEventListener("dragover", (event) => {
     const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell");
     if (!cell) return;
     event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    slotOverlay.querySelectorAll(".drag-over").forEach((element) => {
+      if (element !== cell) element.classList.remove("drag-over");
+    });
     cell.classList.add("drag-over");
   });
   slotOverlay.addEventListener("dragleave", (event) => {
@@ -787,8 +818,14 @@ function wireEvents(): void {
     event.preventDefault();
     cell.classList.remove("drag-over");
     const targetSlot = Number(cell.dataset.slot);
-    const textureId = Number(event.dataTransfer.getData("application/x-ptam-texture"));
-    const sourceSlot = Number(event.dataTransfer.getData("application/x-ptam-slot"));
+    let textureId = Number(event.dataTransfer.getData("application/x-ptam-texture"));
+    let sourceSlot = Number(event.dataTransfer.getData("application/x-ptam-slot"));
+    const plain = event.dataTransfer.getData("text/plain");
+    if (!textureId && plain.startsWith("ptam-texture:")) textureId = Number(plain.slice(13));
+    if (!sourceSlot && plain.startsWith("ptam-slot:")) sourceSlot = Number(plain.slice(10));
+    if (!textureId && activeDrag?.kind === "texture") textureId = activeDrag.textureId;
+    if (!sourceSlot && activeDrag?.kind === "slot") sourceSlot = activeDrag.sourceSlot;
+    activeDrag = null;
     if (textureId) assignTexture(textureId, targetSlot);
     else if (sourceSlot) moveSlot(sourceSlot, targetSlot);
   });
