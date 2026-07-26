@@ -785,6 +785,10 @@ async function restoreBackground(): Promise<void> {
 }
 
 function wireEvents(): void {
+  window.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
   $("#add-button").addEventListener("click", () => void chooseTextures());
   $("#remove-button").addEventListener("click", () => void removeSelected());
   $("#clear-button").addEventListener("click", () => void clearTextures());
