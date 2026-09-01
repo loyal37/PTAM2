@@ -135,19 +135,20 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <header class="topbar glass">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-        <div><h1>PTAM<span>2</span></h1><p>Texture Atlas Studio</p></div>
+        <h1>PTAM<span>2</span></h1>
       </div>
-      <div class="topbar-status" aria-live="polite"><span class="status-dot"></span><span id="engine-status">Rust 图像引擎就绪</span></div>
+      <div class="topbar-status" id="engine-activity" aria-live="polite" hidden><span class="status-dot"></span><span id="engine-status"></span></div>
       <div class="top-actions">
-        <button class="ghost-button" id="background-button" title="设置界面背景">背景</button>
-        <button class="ghost-button danger-subtle" id="clear-background-button" title="清除界面背景">清除背景</button>
+        <button class="icon-button" id="settings-button" title="设置" aria-label="打开设置" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25A3.75 3.75 0 1 0 12 15.75 3.75 3.75 0 0 0 12 8.25ZM20 13.2V10.8L17.9 10a6.2 6.2 0 0 0-.55-1.32l.92-2.06-1.7-1.7-2.05.93A6.2 6.2 0 0 0 13.2 5.3L12.4 3h-2.4l-.8 2.3a6.2 6.2 0 0 0-1.32.55l-2.06-.92-1.7 1.7L5.05 8.7A6.2 6.2 0 0 0 4.5 10L2.4 10.8v2.4l2.1.8c.13.46.32.9.55 1.32l-.92 2.06 1.7 1.7 2.05-.93c.42.24.86.42 1.32.55l.8 2.3h2.4l.8-2.3c.46-.13.9-.31 1.32-.55l2.06.93 1.7-1.7-.93-2.06c.24-.42.42-.86.55-1.32l2.1-.8Z" /></svg>
+        </button>
       </div>
     </header>
 
     <section class="workspace">
       <aside class="control-column glass">
         <div class="section-heading">
-          <div><span class="eyebrow">INPUT</span><h2>贴图库</h2></div>
+          <h2>贴图</h2>
           <span class="count-badge" id="texture-count">0</span>
         </div>
         <div class="button-grid four-actions">
@@ -157,66 +158,31 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button class="danger-button" id="clear-button">清空</button>
         </div>
         <div class="texture-list" id="texture-list">
-          <div class="list-empty"><div class="empty-icon">◇</div><strong>尚未添加贴图</strong><span>支持 DDS / PNG / JPG / BMP / TGA / TIFF / WebP</span></div>
+          <div class="list-empty"><div class="empty-icon">◇</div><strong>点击“添加”选择贴图</strong></div>
         </div>
 
         <div class="section-divider"></div>
         <div class="section-heading compact">
-          <div><span class="eyebrow">BASE MODE</span><h2>底图槽位</h2></div>
+          <h2>底图槽位</h2>
         </div>
         <div class="button-grid">
           <button id="base-button">选择底图</button>
           <button class="danger-button" id="clear-base-button">清除底图</button>
         </div>
-        <div class="base-card" id="base-card">
-          <div class="base-placeholder">未启用底图模式</div>
-        </div>
+        <div class="base-card" id="base-card" hidden></div>
         <div class="slot-summary" id="slot-summary">添加底图与贴图后可拖拽分配槽位</div>
         <button class="wide-button" id="auto-place-button">自动顺序放置</button>
-
-        <div class="section-divider"></div>
-        <div class="section-heading compact">
-          <div><span class="eyebrow">LAYOUT</span><h2>拼图设置</h2></div>
-        </div>
-        <div class="settings-grid">
-          <label>排列方式<select id="layout-mode">
-            <option value="auto">自动网格</option><option value="horizontal">横向</option>
-            <option value="vertical">纵向</option><option value="grid">固定列数</option>
-          </select></label>
-          <label id="columns-field">固定列数<input id="columns" type="number" min="1" max="64" /></label>
-          <label>间距像素<input id="padding" type="number" min="0" max="512" /></label>
-          <label>最终画布<select id="canvas-mode">
-            <option value="auto">自动</option><option value="1024">1024 × 1024</option>
-            <option value="2048">2048 × 2048</option><option value="4096">4096 × 4096</option>
-            <option value="8192">8192 × 8192</option><option value="custom">自定义</option>
-          </select></label>
-          <div class="size-pair" id="custom-size-fields">
-            <label>宽度<input id="canvas-width" type="number" min="1" max="32768" /></label>
-            <span>×</span>
-            <label>高度<input id="canvas-height" type="number" min="1" max="32768" /></label>
-          </div>
-          <label>导出格式<select id="export-format">
-            <option value="png">PNG 无损</option><option value="dxt5">DDS · DXT5</option>
-            <option value="bc7-linear">DDS · BC7 线性</option><option value="bc7-srgb">DDS · BC7 sRGB</option>
-          </select></label>
-          <label id="quality-field">压缩质量<select id="quality">
-            <option value="fast">快速</option><option value="normal">均衡</option><option value="slow">高质量</option>
-          </select></label>
-        </div>
-        <label class="check-row"><input id="export-json" type="checkbox" /><span>同时导出 JSON 坐标表</span></label>
-        <label class="opacity-row"><span>面板不透明度</span><input id="panel-opacity" type="range" min="45" max="100" /></label>
       </aside>
 
       <section class="preview-column glass">
         <div class="preview-header">
-          <div><span class="eyebrow">LIVE CANVAS</span><h2>图集预览</h2></div>
+          <h2>预览</h2>
           <div class="canvas-meta"><span id="canvas-dimensions">— × —</span><span id="canvas-mode-badge">等待生成</span></div>
         </div>
         <div class="preview-stage" id="preview-stage">
           <div class="stage-empty" id="stage-empty">
             <div class="stage-orbit"><span></span><i></i></div>
-            <h3>准备创建你的图集</h3>
-            <p>添加贴图并生成预览；使用 DDS 底图时，可把左侧贴图拖入槽位。</p>
+            <h3>添加贴图开始</h3>
           </div>
           <div class="atlas-frame" id="atlas-frame" hidden>
             <img id="preview-image" alt="图集预览" draggable="false" />
@@ -225,23 +191,69 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <div class="busy-overlay" id="busy-overlay" hidden><span class="spinner"></span><strong id="busy-label">正在处理</strong></div>
         </div>
         <div class="preview-footer">
-          <div class="legend">
-            <span><i class="legend-box available"></i>可用槽位</span>
-            <span><i class="legend-box occupied"></i>已放置</span>
-            <span><i class="legend-box patch"></i>DDS 原位补丁</span>
-          </div>
           <div class="footer-actions">
             <button class="large-button" id="preview-button">生成预览</button>
             <button class="large-button accent-button" id="export-button">导出图集 <span>→</span></button>
           </div>
         </div>
-        <div class="diagnostic-strip" id="diagnostic-strip">
-          <span class="diagnostic-icon">i</span>
-          <p><strong>原生处理管线</strong><span>预览最长边限制为 2048px，导出始终使用完整分辨率。</span></p>
-        </div>
       </section>
     </section>
   </main>
+  <div class="settings-overlay" id="settings-overlay" hidden>
+    <section class="settings-drawer glass" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="settings-header">
+        <h2 id="settings-title">设置</h2>
+        <button class="icon-button" id="settings-close-button" title="关闭" aria-label="关闭设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+        </button>
+      </header>
+
+      <div class="settings-section">
+        <h3>布局</h3>
+        <div class="settings-grid">
+          <label>排列<select id="layout-mode">
+            <option value="auto">自动网格</option><option value="horizontal">横向</option>
+            <option value="vertical">纵向</option><option value="grid">固定列数</option>
+          </select></label>
+          <label id="columns-field">列数<input id="columns" type="number" min="1" max="64" /></label>
+          <label>间距<input id="padding" type="number" min="0" max="512" /></label>
+          <label>画布<select id="canvas-mode">
+            <option value="auto">自动</option><option value="1024">1024 × 1024</option>
+            <option value="2048">2048 × 2048</option><option value="4096">4096 × 4096</option>
+            <option value="8192">8192 × 8192</option><option value="custom">自定义</option>
+          </select></label>
+          <div class="size-pair" id="custom-size-fields">
+            <label>宽<input id="canvas-width" type="number" min="1" max="32768" /></label>
+            <span>×</span>
+            <label>高<input id="canvas-height" type="number" min="1" max="32768" /></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>导出</h3>
+        <div class="settings-grid">
+          <label>格式<select id="export-format">
+            <option value="png">PNG 无损</option><option value="dxt5">DDS · DXT5</option>
+            <option value="bc7-linear">DDS · BC7 线性</option><option value="bc7-srgb">DDS · BC7 sRGB</option>
+          </select></label>
+          <label id="quality-field">质量<select id="quality">
+            <option value="fast">快速</option><option value="normal">均衡</option><option value="slow">高质量</option>
+          </select></label>
+        </div>
+        <label class="check-row"><input id="export-json" type="checkbox" /><span>导出 JSON 坐标</span></label>
+      </div>
+
+      <div class="settings-section">
+        <h3>界面</h3>
+        <div class="button-grid">
+          <button id="background-button">选择背景</button>
+          <button class="danger-button" id="clear-background-button">清除背景</button>
+        </div>
+        <label class="opacity-row"><span>面板透明度</span><input id="panel-opacity" type="range" min="45" max="100" /></label>
+      </div>
+    </section>
+  </div>
   <div class="toast-stack" id="toast-stack"></div>
   <div class="modal-root" id="modal-root"></div>
 `;
@@ -258,6 +270,7 @@ const atlasFrame = $("#atlas-frame");
 const slotOverlay = $("#slot-overlay");
 const previewImage = $("#preview-image") as HTMLImageElement;
 const modalRoot = $("#modal-root");
+const settingsOverlay = $("#settings-overlay");
 
 function persistSettings(): void {
   localStorage.setItem("ptam2.settings", JSON.stringify(state.settings));
@@ -298,14 +311,16 @@ function setBusy(busy: boolean, label = "正在处理"): void {
 
 function renderBackgroundActivity(): void {
   const status = $("#engine-status");
+  const activity = $("#engine-activity");
   const dot = document.querySelector<HTMLElement>(".status-dot");
   const labels = Array.from(backgroundActivities.values());
+  activity.hidden = labels.length === 0;
   dot?.classList.toggle("working", labels.length > 0);
-  status.textContent = labels.length === 0
-    ? "Rust 图像引擎就绪"
-    : labels.length === 1
-      ? labels[0]
-      : `${labels.at(-1)} · 共 ${labels.length} 个后台任务`;
+  status.textContent = labels.length === 1
+    ? labels[0]
+    : labels.length > 1
+      ? `${labels.at(-1)} · ${labels.length} 个任务`
+      : "";
 }
 
 function beginBackgroundActivity(label: string): () => void {
@@ -356,7 +371,7 @@ function buildOptions(includeAssignments = true) {
 function renderTextures(): void {
   $("#texture-count").textContent = String(state.textures.length);
   if (state.textures.length === 0) {
-    textureList.innerHTML = `<div class="list-empty"><div class="empty-icon">◇</div><strong>尚未添加贴图</strong><span>支持 DDS / PNG / JPG / BMP / TGA / TIFF / WebP</span></div>`;
+    textureList.innerHTML = `<div class="list-empty"><div class="empty-icon">◇</div><strong>点击“添加”选择贴图</strong></div>`;
   } else {
     textureList.innerHTML = state.textures.map((texture, index) => `
       <article class="texture-item ${state.selected.has(texture.id) ? "selected" : ""}" data-id="${texture.id}" draggable="${Boolean(state.base)}">
@@ -373,10 +388,11 @@ function renderTextures(): void {
 
 function renderBase(): void {
   const card = $("#base-card");
+  card.toggleAttribute("hidden", !state.base);
   if (!state.base) {
-    card.innerHTML = `<div class="base-placeholder">未启用底图模式</div>`;
+    card.innerHTML = "";
   } else {
-    card.innerHTML = `<img src="${state.base.thumbnailDataUrl}" alt="" /><div><strong>${escapeHtml(state.base.name)}</strong><span>${state.base.width} × ${state.base.height} · ${escapeHtml(state.base.format)}</span></div><span class="active-chip">ACTIVE</span>`;
+    card.innerHTML = `<img src="${state.base.thumbnailDataUrl}" alt="" /><div><strong>${escapeHtml(state.base.name)}</strong><span>${state.base.width} × ${state.base.height} · ${escapeHtml(state.base.format)}</span></div>`;
   }
   renderSlotSummary();
   updateButtonState();
@@ -398,7 +414,7 @@ function inferredGrid(): SlotGridInfo | null {
 function renderSlotSummary(): void {
   const summary = $("#slot-summary");
   if (!state.base) {
-    summary.textContent = "添加底图与贴图后可拖拽分配槽位";
+    summary.textContent = "选择底图后可拖入槽位";
     summary.className = "slot-summary";
     return;
   }
@@ -723,8 +739,7 @@ function showResizeDialog(): void {
   if (!state.textures.length) return;
   const first = state.textures[0];
   modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal-card compact-modal">
-    <span class="eyebrow">RESIZE</span><h2>统一贴图尺寸</h2>
-    <p>将使用 Lanczos3 高质量重采样处理 ${state.textures.length} 张贴图。</p>
+    <h2>统一贴图尺寸</h2>
     <div class="modal-size-row"><label>宽度<input id="resize-width" type="number" min="1" max="32768" value="${first.width}" /></label><span>×</span><label>高度<input id="resize-height" type="number" min="1" max="32768" value="${first.height}" /></label></div>
     <label class="check-row"><input id="lock-aspect" type="checkbox" checked /><span>锁定第一张贴图的宽高比</span></label>
     <div class="modal-actions"><button data-close>取消</button><button class="accent-button" id="confirm-resize">应用尺寸</button></div>
@@ -768,6 +783,18 @@ function closeModal(): void {
   modalRoot.innerHTML = "";
 }
 
+function openSettings(): void {
+  settingsOverlay.hidden = false;
+  $("#settings-button").setAttribute("aria-expanded", "true");
+  $("#settings-close-button").focus();
+}
+
+function closeSettings(): void {
+  settingsOverlay.hidden = true;
+  $("#settings-button").setAttribute("aria-expanded", "false");
+  $("#settings-button").focus();
+}
+
 async function exportAtlas(): Promise<void> {
   const isPng = state.settings.exportFormat === "png";
   const path = await save({
@@ -802,7 +829,7 @@ function showExportReport(report: ExportReport): void {
     : "";
   modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal-card report-modal">
     <div class="report-symbol ${patchMode ? "patch" : "success"}">${patchMode ? "BC" : "✓"}</div>
-    <span class="eyebrow">EXPORT COMPLETE</span><h2>图集已安全写入</h2>
+    <h2>导出完成</h2>
     <div class="report-grid"><div><span>尺寸</span><strong>${report.width} × ${report.height}</strong></div><div><span>格式</span><strong>${escapeHtml(report.format)}</strong></div><div><span>模式</span><strong>${escapeHtml(report.mode)}</strong></div><div><span>耗时</span><strong>${report.elapsedMs} ms</strong></div></div>
     ${patchMode ? `<p class="preserve-note">${report.preservedOutsideSlots ? "✓ 已验证：目标槽位之外的原始 DDS 字节完全不变" : "未执行字节保护验证"}</p>` : ""}
     <div class="path-block"><span>输出文件</span><code>${escapeHtml(report.outputPath)}</code>${report.jsonPath ? `<span>坐标表</span><code>${escapeHtml(report.jsonPath)}</code>` : ""}</div>
@@ -858,6 +885,11 @@ function wireEvents(): void {
   $("#auto-place-button").addEventListener("click", autoPlace);
   $("#preview-button").addEventListener("click", () => void generatePreview());
   $("#export-button").addEventListener("click", () => void exportAtlas());
+  $("#settings-button").addEventListener("click", openSettings);
+  $("#settings-close-button").addEventListener("click", closeSettings);
+  settingsOverlay.addEventListener("click", (event) => {
+    if (event.target === settingsOverlay) closeSettings();
+  });
   $("#background-button").addEventListener("click", () => void chooseBackground());
   $("#clear-background-button").addEventListener("click", clearBackground);
 
@@ -961,7 +993,10 @@ function wireEvents(): void {
   });
   window.addEventListener("resize", fitAtlasFrame);
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeModal();
+    if (event.key === "Escape") {
+      if (!settingsOverlay.hidden) closeSettings();
+      else closeModal();
+    }
     if (event.key === "Delete" && state.selected.size) void removeSelected();
   });
 }
