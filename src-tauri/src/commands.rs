@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use image::imageops::FilterType;
+use rayon::prelude::*;
 use serde::Serialize;
 use tauri::State;
 
@@ -10,7 +11,7 @@ use crate::atlas::build_atlas;
 use crate::dds_codec::{parse_quality, patch_blocker, patch_dds_slots, write_dds, write_png};
 use crate::image_io::{
     atomic_write, canonical_key, ensure_extension, image_data_url, load_rgba, load_texture_asset,
-    texture_info,
+    texture_info, texture_info_with_max_edge,
 };
 use crate::models::{
     AddTexturesResponse, AppError, AppResult, AppState, ExportReport, ExportRequest, LoadFailure,
@@ -55,7 +56,11 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
             .iter()
             .map(texture_info)
             .collect::<AppResult<Vec<_>>>()?;
-        let base = project.base.as_ref().map(texture_info).transpose()?;
+        let base = project
+            .base
+            .as_ref()
+            .map(|asset| texture_info_with_max_edge(asset, 2048))
+            .transpose()?;
         Ok::<_, AppError>(ProjectStateResponse { textures, base })
     })
     .await
@@ -70,31 +75,67 @@ pub async fn add_textures(
 ) -> Result<AddTexturesResponse, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // Only inspect and mutate shared state while holding the lock. Image
+        // decoding and preview encoding happen outside it, so other commands
+        // remain responsive while large textures are loading.
+        let existing: HashSet<String> = state
+            .0
+            .read()
+            .map_err(|_| AppError::State)?
+            .textures
+            .iter()
+            .map(|texture| canonical_key(&texture.path))
+            .collect();
+
+        let mut seen = existing;
+        let mut candidates = Vec::new();
+        let mut duplicate_count = 0;
+        for raw_path in paths {
+            let path = PathBuf::from(&raw_path);
+            let key = canonical_key(&path);
+            if !seen.insert(key.clone()) {
+                duplicate_count += 1;
+                continue;
+            }
+            candidates.push((raw_path, path, key));
+        }
+
+        let ids = {
+            let mut store = state.0.write().map_err(|_| AppError::State)?;
+            (0..candidates.len())
+                .map(|_| next_id(&mut store))
+                .collect::<Vec<_>>()
+        };
+
+        let decoded = candidates
+            .into_par_iter()
+            .zip(ids)
+            .map(|((raw_path, path, key), id)| {
+                let result = load_texture_asset(&path, id).and_then(|asset| {
+                    let info = texture_info(&asset)?;
+                    Ok((asset, info))
+                });
+                (raw_path, key, result)
+            })
+            .collect::<Vec<_>>();
+
         let mut store = state.0.write().map_err(|_| AppError::State)?;
-        let mut existing: HashSet<String> = store
+        let mut current: HashSet<String> = store
             .textures
             .iter()
             .map(|texture| canonical_key(&texture.path))
             .collect();
         let mut textures = Vec::new();
         let mut errors = Vec::new();
-        let mut duplicate_count = 0;
-        for raw_path in paths {
-            let path = PathBuf::from(&raw_path);
-            let key = canonical_key(&path);
-            if existing.contains(&key) {
-                duplicate_count += 1;
-                continue;
-            }
-            let id = next_id(&mut store);
-            match load_texture_asset(&path, id).and_then(|asset| {
-                let info = texture_info(&asset)?;
-                Ok((asset, info))
-            }) {
+        for (raw_path, key, result) in decoded {
+            match result {
                 Ok((asset, info)) => {
-                    store.textures.push(asset);
-                    textures.push(info);
-                    existing.insert(key);
+                    if current.insert(key) {
+                        store.textures.push(asset);
+                        textures.push(info);
+                    } else {
+                        duplicate_count += 1;
+                    }
                 }
                 Err(error) => errors.push(LoadFailure {
                     path: raw_path,
@@ -169,11 +210,13 @@ pub async fn set_base_texture(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(path);
-        let mut store = state.0.write().map_err(|_| AppError::State)?;
-        let id = next_id(&mut store);
+        let id = {
+            let mut store = state.0.write().map_err(|_| AppError::State)?;
+            next_id(&mut store)
+        };
         let asset = load_texture_asset(&path, id)?;
-        let info = texture_info(&asset)?;
-        store.base = Some(asset);
+        let info = texture_info_with_max_edge(&asset, 2048)?;
+        state.0.write().map_err(|_| AppError::State)?.base = Some(asset);
         Ok::<_, AppError>(info)
     })
     .await

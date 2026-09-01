@@ -59,6 +59,13 @@ pub fn load_rgba(path: &Path) -> AppResult<RgbaImage> {
 }
 
 pub fn texture_info(asset: &TextureAsset) -> AppResult<TextureInfo> {
+    texture_info_with_max_edge(asset, 256)
+}
+
+pub fn texture_info_with_max_edge(
+    asset: &TextureAsset,
+    preview_max_edge: u32,
+) -> AppResult<TextureInfo> {
     Ok(TextureInfo {
         id: asset.id,
         name: asset.name.clone(),
@@ -66,10 +73,7 @@ pub fn texture_info(asset: &TextureAsset) -> AppResult<TextureInfo> {
         width: asset.image.width(),
         height: asset.image.height(),
         format: asset.format.clone(),
-        // This data URL is also used by the zero-latency slot compositor in
-        // the webview, so keep enough detail for the canvas rather than only
-        // sizing it for the 40px list thumbnail.
-        thumbnail_data_url: image_data_url(&asset.image, 256)?,
+        thumbnail_data_url: image_data_url(&asset.image, preview_max_edge)?,
     })
 }
 

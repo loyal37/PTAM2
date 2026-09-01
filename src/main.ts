@@ -116,6 +116,8 @@ const state = {
   preview: null as PreviewResponse | null,
   settings: loadSettings(),
   busy: false,
+  loadingTextures: 0,
+  loadingBase: 0,
 };
 
 type ActiveDrag =
@@ -123,6 +125,9 @@ type ActiveDrag =
   | { kind: "slot"; sourceSlot: number };
 
 let activeDrag: ActiveDrag | null = null;
+let previewRequestRevision = 0;
+let nextActivityId = 0;
+const backgroundActivities = new Map<number, string>();
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div class="background-art" id="background-art"></div>
@@ -132,7 +137,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
         <div><h1>PTAM<span>2</span></h1><p>Texture Atlas Studio</p></div>
       </div>
-      <div class="topbar-status"><span class="status-dot"></span><span id="engine-status">Rust 图像引擎就绪</span></div>
+      <div class="topbar-status" aria-live="polite"><span class="status-dot"></span><span id="engine-status">Rust 图像引擎就绪</span></div>
       <div class="top-actions">
         <button class="ghost-button" id="background-button" title="设置界面背景">背景</button>
         <button class="ghost-button danger-subtle" id="clear-background-button" title="清除界面背景">清除背景</button>
@@ -291,7 +296,37 @@ function setBusy(busy: boolean, label = "正在处理"): void {
   if (!busy) updateButtonState();
 }
 
+function renderBackgroundActivity(): void {
+  const status = $("#engine-status");
+  const dot = document.querySelector<HTMLElement>(".status-dot");
+  const labels = Array.from(backgroundActivities.values());
+  dot?.classList.toggle("working", labels.length > 0);
+  status.textContent = labels.length === 0
+    ? "Rust 图像引擎就绪"
+    : labels.length === 1
+      ? labels[0]
+      : `${labels.at(-1)} · 共 ${labels.length} 个后台任务`;
+}
+
+function beginBackgroundActivity(label: string): () => void {
+  const id = ++nextActivityId;
+  backgroundActivities.set(id, label);
+  renderBackgroundActivity();
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    backgroundActivities.delete(id);
+    renderBackgroundActivity();
+  };
+}
+
 function invalidatePreview(): void {
+  previewRequestRevision += 1;
+  if (state.base) {
+    renderBasePreview();
+    return;
+  }
   state.preview = null;
   renderPreview();
 }
@@ -399,6 +434,18 @@ function renderPreview(): void {
   renderSlots();
 }
 
+function renderBasePreview(): void {
+  if (!state.base) return;
+  state.preview = {
+    width: state.base.width,
+    height: state.base.height,
+    previewDataUrl: state.base.thumbnailDataUrl,
+    placements: [],
+    grid: inferredGrid(),
+  };
+  renderPreview();
+}
+
 function fitAtlasFrame(): void {
   if (!state.preview) return;
   const width = Math.max(120, previewStage.clientWidth - 72);
@@ -476,6 +523,8 @@ function updateAssignmentUi(textureIds: Array<number | undefined>, slots: Array<
 
 function updateButtonState(): void {
   const disabled = state.busy;
+  ($("#add-button") as HTMLButtonElement).disabled = disabled || state.loadingTextures > 0;
+  ($("#base-button") as HTMLButtonElement).disabled = disabled || state.loadingBase > 0;
   ($("#remove-button") as HTMLButtonElement).disabled = disabled || state.selected.size === 0;
   ($("#resize-button") as HTMLButtonElement).disabled = disabled || state.textures.length === 0;
   ($("#clear-button") as HTMLButtonElement).disabled = disabled || state.textures.length === 0;
@@ -510,19 +559,25 @@ function updateConditionalSettings(): void {
   ($("#quality") as HTMLSelectElement).disabled = state.settings.exportFormat === "png";
 }
 
-async function generatePreview(silent = false): Promise<void> {
+async function generatePreview(silent = false, blocking = true): Promise<void> {
   if (state.textures.length === 0 && !state.base) return;
-  setBusy(true, "Rust 引擎正在生成预览");
+  if (state.base) {
+    renderBasePreview();
+    if (!silent) toast(`预览已生成：${state.base.width} × ${state.base.height}`, "success");
+    return;
+  }
+  const revision = ++previewRequestRevision;
+  if (blocking) setBusy(true, "Rust 引擎正在生成预览");
   try {
-    // Base mode is composited instantly in the webview. Keep the Rust preview
-    // assignment-free so moving a texture never leaves stale pixels behind.
-    state.preview = await invoke<PreviewResponse>("build_preview", { options: buildOptions(!state.base) });
+    const preview = await invoke<PreviewResponse>("build_preview", { options: buildOptions() });
+    if (revision !== previewRequestRevision) return;
+    state.preview = preview;
     renderPreview();
     if (!silent) toast(`预览已生成：${state.preview.width} × ${state.preview.height}`, "success");
   } catch (error) {
-    toast(errorText(error), "error", 6500);
+    if (revision === previewRequestRevision) toast(errorText(error), "error", 6500);
   } finally {
-    setBusy(false);
+    if (blocking) setBusy(false);
   }
 }
 
@@ -532,12 +587,13 @@ async function chooseTextures(): Promise<void> {
     filters: [{ name: "贴图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
   if (!paths) return;
-  setBusy(true, "正在解码贴图");
+  const selectedPaths = Array.isArray(paths) ? paths : [paths];
+  state.loadingTextures += 1;
+  updateButtonState();
+  const finishActivity = beginBackgroundActivity(`后台加载 ${selectedPaths.length} 张贴图…`);
   try {
-    const response = await invoke<AddTexturesResponse>("add_textures", { paths: Array.isArray(paths) ? paths : [paths] });
+    const response = await invoke<AddTexturesResponse>("add_textures", { paths: selectedPaths });
     state.textures.push(...response.textures);
-    state.assignments.clear();
-    state.selected.clear();
     invalidatePreview();
     renderTextures();
     renderSlotSummary();
@@ -546,11 +602,12 @@ async function chooseTextures(): Promise<void> {
     if (response.errors.length) {
       toast(response.errors.map((item) => `${item.path}: ${item.message}`).join("\n"), "error", 8000);
     }
-    if (state.base && response.textures.length) await generatePreview(true);
   } catch (error) {
     toast(errorText(error), "error");
   } finally {
-    setBusy(false);
+    state.loadingTextures = Math.max(0, state.loadingTextures - 1);
+    finishActivity();
+    updateButtonState();
   }
 }
 
@@ -592,7 +649,9 @@ async function chooseBase(): Promise<void> {
     filters: [{ name: "底图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
   if (!path || Array.isArray(path)) return;
-  setBusy(true, "正在解码底图");
+  state.loadingBase += 1;
+  updateButtonState();
+  const finishActivity = beginBackgroundActivity("后台加载底图…");
   try {
     state.base = await invoke<TextureInfo>("set_base_texture", { path });
     state.assignments.clear();
@@ -600,11 +659,12 @@ async function chooseBase(): Promise<void> {
     renderBase();
     renderTextures();
     toast("底图模式已启用", "success");
-    if (state.textures.length) await generatePreview(true);
   } catch (error) {
     toast(errorText(error), "error");
   } finally {
-    setBusy(false);
+    state.loadingBase = Math.max(0, state.loadingBase - 1);
+    finishActivity();
+    updateButtonState();
   }
 }
 
@@ -918,7 +978,7 @@ async function initialize(): Promise<void> {
   }
   renderTextures();
   renderBase();
-  renderPreview();
+  invalidatePreview();
   await restoreBackground();
 }
 

@@ -93,6 +93,8 @@ button { color: inherit; }
 
 .topbar-status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: #94acbe; font-size: 12px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+.status-dot.working { background: var(--amber); box-shadow: 0 0 12px var(--amber); animation: status-pulse 1.1s ease-in-out infinite; }
+@keyframes status-pulse { 50% { opacity: .38; transform: scale(.72); } }
 .top-actions { display: flex; gap: 8px; margin-left: 24px; }
 
 button {
