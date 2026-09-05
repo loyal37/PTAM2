@@ -114,7 +114,7 @@ function loadSettings(): PersistedSettings {
     for (const key of Object.keys(enums) as Array<keyof typeof enums>) {
       if (enums[key].includes(saved[key])) settings[key] = saved[key];
     }
-    const limits = { columns: [1, 64], padding: [0, 512], canvasWidth: [1, 32768], canvasHeight: [1, 32768], panelOpacity: [45, 100] };
+    const limits = { columns: [1, 64], padding: [0, 512], canvasWidth: [1, 32768], canvasHeight: [1, 32768], panelOpacity: [0, 100] };
     for (const key of Object.keys(limits) as Array<keyof typeof limits>) {
       if (typeof saved[key] === "number" && Number.isFinite(saved[key])) {
         settings[key] = Math.min(limits[key][1], Math.max(limits[key][0], Math.round(saved[key])));
@@ -279,7 +279,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button id="background-button">选择背景</button>
           <button class="danger-button" id="clear-background-button">清除背景</button>
         </div>
-        <label class="opacity-row"><span>面板不透明度</span><input id="panel-opacity" type="range" min="45" max="100" /></label>
+        <label class="opacity-row"><span>不透明度</span><input id="panel-opacity" type="range" min="0" max="100" /><output id="panel-opacity-value" for="panel-opacity"></output></label>
       </div>
     </section>
   </div>
@@ -679,9 +679,15 @@ function applySettingsToUi(): void {
   ($("#export-format") as HTMLSelectElement).value = settings.exportFormat;
   ($("#quality") as HTMLSelectElement).value = settings.quality;
   ($("#export-json") as HTMLInputElement).checked = settings.exportJson;
-  ($("#panel-opacity") as HTMLInputElement).value = String(settings.panelOpacity);
-  document.documentElement.style.setProperty("--panel-alpha", String(settings.panelOpacity / 100));
+  applyPanelOpacity();
   updateConditionalSettings();
+}
+
+function applyPanelOpacity(): void {
+  const opacity = state.settings.panelOpacity;
+  ($("#panel-opacity") as HTMLInputElement).value = String(opacity);
+  $("#panel-opacity-value").textContent = `${opacity}%`;
+  document.documentElement.style.setProperty("--panel-alpha", String(opacity / 100));
 }
 
 function updateConditionalSettings(): void {
@@ -929,6 +935,7 @@ function openSettings(): void {
 }
 
 function closeSettings(): void {
+  settingsOverlay.classList.remove("opacity-preview");
   settingsOverlay.hidden = true;
   $("#settings-button").setAttribute("aria-expanded", "false");
   $("#settings-button").focus();
@@ -1137,9 +1144,11 @@ function wireEvents(): void {
   bindSetting("#export-json", (element) => state.settings.exportJson = (element as HTMLInputElement).checked, false);
   $("#panel-opacity").addEventListener("input", (event) => {
     state.settings.panelOpacity = Number((event.target as HTMLInputElement).value);
-    document.documentElement.style.setProperty("--panel-alpha", String(state.settings.panelOpacity / 100));
+    applyPanelOpacity();
     persistSettings();
   });
+  $("#panel-opacity").addEventListener("focus", () => settingsOverlay.classList.add("opacity-preview"));
+  $("#panel-opacity").addEventListener("blur", () => settingsOverlay.classList.remove("opacity-preview"));
   window.addEventListener("resize", fitAtlasFrame);
   window.addEventListener("keydown", (event) => {
     const dialog = modalRoot.firstElementChild ?? (!settingsOverlay.hidden ? settingsOverlay : null);

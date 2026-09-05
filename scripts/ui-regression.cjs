@@ -209,6 +209,68 @@ const executablePath = process.env.PTAM_BROWSER_PATH || (fs.existsSync(chrome) ?
       assert.equal(await p.locator('.report-grid').isVisible(), false);
       assert.equal(await p.locator('.toast.success').count(), 0);
     });
+    await run('opacity visibly changes panels without fading textures and survives reload', 'base', async p => {
+      await p.locator('#auto-place-button').click();
+      await tick(p);
+      const texturePixel = await pixels(p, 64, 128);
+      // A contrasting background makes this a rendered-pixel test, not just a variable check.
+      await p.locator('#background-art').evaluate(element => {
+        element.style.backgroundImage = 'none';
+        element.style.backgroundColor = 'rgb(220, 120, 40)';
+      });
+      await p.locator('#settings-button').click();
+      const slider = p.locator('#panel-opacity');
+      await slider.focus();
+      await p.keyboard.press('End');
+      await tick(p);
+      assert.equal(await p.locator('#panel-opacity-value').innerText(), '100%');
+      assert.equal(await p.locator('#settings-overlay').evaluate(el => getComputedStyle(el).backdropFilter), 'none');
+      const sample = async () => {
+        const box = await p.locator('#texture-list').boundingBox();
+        const screenshot = await p.screenshot({ animations: 'disabled' });
+        return p.evaluate(async ({ data, x, y }) => {
+          const image = new Image();
+          image.src = 'data:image/png;base64,' + data;
+          await image.decode();
+          const canvas = document.createElement('canvas');
+          canvas.width = image.width; canvas.height = image.height;
+          const context = canvas.getContext('2d');
+          context.drawImage(image, 0, 0);
+          return Array.from(context.getImageData(x, y, 1, 1).data);
+        }, { data: screenshot.toString('base64'), x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height - 30) });
+      };
+      const opaque = await sample();
+      if (process.env.PTAM_SCREENSHOT_DIR) await p.screenshot({ path: path.join(process.env.PTAM_SCREENSHOT_DIR, 'ptam2-opacity-100.png') });
+      // Also exercise a real mouse drag, in addition to keyboard endpoints.
+      const box = await slider.boundingBox();
+      await p.mouse.move(box.x + box.width - 8, box.y + box.height / 2);
+      await p.mouse.down();
+      await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 6 });
+      await p.mouse.up();
+      assert.ok(Math.abs(Number(await slider.inputValue()) - 50) <= 5);
+      await p.keyboard.press('Home');
+      await tick(p);
+      assert.equal(await slider.inputValue(), '0');
+      assert.equal(await p.locator('#panel-opacity-value').innerText(), '0%');
+      const transparent = await sample();
+      assert.ok(transparent[0] - opaque[0] > 100, `Visible difference: ${opaque} -> ${transparent}`);
+      const panelStyles = await p.locator('.glass, #texture-list, #base-card, #preview-stage').evaluateAll(elements => elements.map(el => ({
+        background: getComputedStyle(el).backgroundColor, opacity: getComputedStyle(el).opacity,
+      })));
+      for (const style of panelStyles) {
+        assert.match(style.background, /, 0\)$/);
+        assert.equal(style.opacity, '1', 'Only panel backgrounds should fade');
+      }
+      assert.deepEqual(await pixels(p, 64, 128), texturePixel);
+      if (process.env.PTAM_SCREENSHOT_DIR) await p.screenshot({ path: path.join(process.env.PTAM_SCREENSHOT_DIR, 'ptam2-opacity-0.png') });
+      await p.keyboard.press('Escape');
+      assert.equal(await p.locator('#settings-overlay').evaluate(el => el.classList.contains('opacity-preview')), false);
+      await p.reload();
+      await p.locator('#settings-button').click();
+      assert.equal(await slider.inputValue(), '0');
+      assert.equal(await p.locator('#panel-opacity-value').innerText(), '0%');
+      assert.equal(await p.evaluate(() => JSON.parse(localStorage.getItem('ptam2.settings')).panelOpacity), 0);
+    });
     await run('compact window keeps primary actions reachable', 'base', async p => {
       await p.setViewportSize({ width: 1000, height: 650 });
       await p.locator('#auto-place-button').click();

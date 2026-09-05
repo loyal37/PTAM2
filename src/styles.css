@@ -59,7 +59,7 @@ button { color: inherit; }
   background: rgba(6, 15, 27, var(--panel-alpha));
   border: 1px solid var(--line);
   box-shadow: 0 18px 52px rgba(0, 0, 0, .28), inset 0 1px rgba(255, 255, 255, .025);
-  backdrop-filter: blur(20px) saturate(125%);
+  backdrop-filter: blur(calc(20px * var(--panel-alpha))) saturate(125%);
 }
 
 .topbar {
@@ -141,7 +141,7 @@ button:disabled { opacity: .35; cursor: default; }
   overflow: hidden auto;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(1, 8, 15, .48);
+  background: rgba(1, 8, 15, calc(.55 * var(--panel-alpha)));
   padding: 5px;
   scrollbar-width: thin;
   scrollbar-color: rgba(119, 157, 183, .45) transparent;
@@ -179,7 +179,7 @@ button:disabled { opacity: .35; cursor: default; }
 
 .section-divider { height: 1px; margin: 17px 0 14px; background: linear-gradient(90deg, transparent, var(--line-strong), transparent); }
 
-.base-card { min-height: 54px; margin-top: 8px; padding: 7px; display: flex; gap: 10px; align-items: center; border: 1px dashed rgba(135, 178, 202, .22); border-radius: 9px; background: rgba(3, 10, 17, .34); }
+.base-card { min-height: 54px; margin-top: 8px; padding: 7px; display: flex; gap: 10px; align-items: center; border: 1px dashed rgba(135, 178, 202, .22); border-radius: 9px; background: rgba(3, 10, 17, calc(.39 * var(--panel-alpha))); }
 .base-card img { width: 40px; height: 40px; object-fit: contain; border-radius: 5px; background: #111a22; }
 .base-card > div { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
 .base-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
@@ -208,11 +208,14 @@ select:focus, input:focus { border-color: rgba(75, 199, 230, .55); box-shadow: 0
 .size-pair > span { padding-bottom: 10px; color: #658196; }
 .check-row { display: flex; align-items: center; gap: 8px; margin-top: 11px; cursor: pointer; }
 .check-row input { accent-color: #43b9d7; }
-.opacity-row { display: grid; grid-template-columns: 105px 1fr; align-items: center; margin-top: 11px; }
+.opacity-row { display: grid; grid-template-columns: 70px minmax(0, 1fr) 38px; gap: 8px; align-items: center; margin-top: 11px; }
+.opacity-row input { width: 100%; margin: 0; }
+.opacity-row output { color: #dceaf3; text-align: right; font-variant-numeric: tabular-nums; }
 input[type="range"] { accent-color: #48c4df; }
 
 .settings-overlay { position: fixed; z-index: 180; inset: 0; display: flex; justify-content: flex-end; padding: 10px; background: rgba(1, 7, 13, .58); backdrop-filter: blur(5px); }
-.settings-drawer { width: min(420px, calc(100vw - 20px)); height: 100%; overflow: hidden auto; padding: 20px; border-radius: 14px; background: rgba(7, 18, 31, .98); scrollbar-width: thin; scrollbar-color: rgba(119, 157, 183, .45) transparent; animation: drawer-in .18s ease-out; }
+.settings-drawer { width: min(420px, calc(100vw - 20px)); height: 100%; overflow: hidden auto; padding: 20px; border-radius: 14px; background: rgba(7, 18, 31, var(--panel-alpha)); scrollbar-width: thin; scrollbar-color: rgba(119, 157, 183, .45) transparent; animation: drawer-in .18s ease-out; }
+.settings-overlay.opacity-preview { background: transparent; backdrop-filter: none; }
 @keyframes drawer-in { from { opacity: 0; transform: translateX(18px); } }
 .settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .settings-header h2 { margin: 0; font-size: 19px; }
@@ -234,7 +237,7 @@ input[type="range"] { accent-color: #48c4df; }
   overflow: hidden;
   border: 1px solid rgba(137, 188, 215, .17);
   border-radius: 12px;
-  background-color: rgba(1, 7, 13, .7);
+  background-color: rgba(1, 7, 13, calc(.8 * var(--panel-alpha)));
   background-image: linear-gradient(45deg, rgba(46, 68, 82, .18) 25%, transparent 25%), linear-gradient(-45deg, rgba(46, 68, 82, .18) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(46, 68, 82, .18) 75%), linear-gradient(-45deg, transparent 75%, rgba(46, 68, 82, .18) 75%);
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
