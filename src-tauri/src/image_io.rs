@@ -31,7 +31,7 @@ pub fn load_texture_asset(path: &Path, id: u64) -> AppResult<TextureAsset> {
         path: path.to_path_buf(),
         name,
         format,
-        image,
+        image: image.into(),
     })
 }
 

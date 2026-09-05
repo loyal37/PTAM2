@@ -40,6 +40,7 @@ pub fn patch_blocker(
     grid: SlotGridInfo,
     canvas_width: u32,
     canvas_height: u32,
+    output_format: &str,
 ) -> Option<String> {
     if !base
         .path
@@ -76,6 +77,9 @@ pub fn patch_blocker(
         Ok(format) => format,
         Err(info) => return Some(format!("不支持的底图格式：{info:?}")),
     };
+    if output_image_format(output_format).ok() != Some(format) {
+        return Some("导出格式与底图不同".into());
+    }
     if block_size(format).is_none() {
         return Some("底图压缩格式不支持槽位补丁".into());
     }
@@ -247,12 +251,8 @@ pub fn write_dds(
     output_format: &str,
     quality: Quality,
 ) -> AppResult<String> {
-    let (format, legacy_dxt5) = match output_format {
-        "dxt5" => (ImageFormat::BC3RgbaUnorm, true),
-        "bc7-linear" => (ImageFormat::BC7RgbaUnorm, false),
-        "bc7-srgb" => (ImageFormat::BC7RgbaUnormSrgb, false),
-        other => return Err(AppError::Invalid(format!("未知 DDS 导出格式：{other}"))),
-    };
+    let format = output_image_format(output_format)?;
+    let legacy_dxt5 = output_format == "dxt5";
     let surface = SurfaceRgba8::from_image(image)
         .encode(format, quality, Mipmaps::Disabled)
         .map_err(|error| AppError::Dds(error.to_string()))?;
@@ -278,6 +278,15 @@ pub fn write_dds(
         .map_err(|error| AppError::Dds(error.to_string()))?;
     atomic_write(path, &bytes)?;
     Ok(format_name(format).into())
+}
+
+fn output_image_format(value: &str) -> AppResult<ImageFormat> {
+    match value {
+        "dxt5" => Ok(ImageFormat::BC3RgbaUnorm),
+        "bc7-linear" => Ok(ImageFormat::BC7RgbaUnorm),
+        "bc7-srgb" => Ok(ImageFormat::BC7RgbaUnormSrgb),
+        other => Err(AppError::Invalid(format!("未知 DDS 导出格式：{other}"))),
+    }
 }
 
 fn read_dds(path: &Path) -> AppResult<Dds> {
@@ -352,14 +361,14 @@ mod tests {
             path: base_path.clone(),
             name: "base.dds".into(),
             format: "DDS".into(),
-            image: base_image,
+            image: base_image.into(),
         };
         let source = TextureAsset {
             id: 1,
             path: source_path,
             name: "source.dds".into(),
             format: "DDS".into(),
-            image: source_image,
+            image: source_image.into(),
         };
         let grid = SlotGridInfo {
             slot_width: 4,

@@ -30,7 +30,7 @@ pub struct TextureAsset {
     pub path: PathBuf,
     pub name: String,
     pub format: String,
-    pub image: RgbaImage,
+    pub image: Arc<RgbaImage>,
 }
 
 #[derive(Clone, Default)]
@@ -44,6 +44,23 @@ pub struct TextureStore {
     pub next_id: u64,
     pub textures: Vec<TextureAsset>,
     pub base: Option<TextureAsset>,
+    pub textures_epoch: u64,
+    pub base_revision: u64,
+}
+
+impl TextureStore {
+    pub fn clear_base(&mut self) {
+        self.base_revision += 1;
+        self.base = None;
+    }
+
+    pub fn commit_base(&mut self, revision: u64, asset: TextureAsset) -> bool {
+        if revision != self.base_revision {
+            return false;
+        }
+        self.base = Some(asset);
+        true
+    }
 }
 
 #[derive(Clone, Default)]

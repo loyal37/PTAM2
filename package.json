@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:ui": "node scripts/ui-regression.cjs",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -14,6 +15,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.4",
+    "playwright": "1.62.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
   }

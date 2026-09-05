@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use tauri::State;
 
-use crate::atlas::build_atlas;
+use crate::atlas::{build_atlas, build_preview as render_preview};
 use crate::dds_codec::{parse_quality, patch_blocker, patch_dds_slots, write_dds, write_png};
 use crate::image_io::{
     atomic_write, canonical_key, ensure_extension, image_data_url, load_rgba, load_texture_asset,
@@ -74,6 +74,11 @@ pub async fn add_textures(
     state: State<'_, AppState>,
 ) -> Result<AddTexturesResponse, String> {
     let state = state.inner().clone();
+    let epoch = state
+        .0
+        .read()
+        .map_err(|_| message(AppError::State))?
+        .textures_epoch;
     tauri::async_runtime::spawn_blocking(move || {
         // Only inspect and mutate shared state while holding the lock. Image
         // decoding and preview encoding happen outside it, so other commands
@@ -120,6 +125,13 @@ pub async fn add_textures(
             .collect::<Vec<_>>();
 
         let mut store = state.0.write().map_err(|_| AppError::State)?;
+        if store.textures_epoch != epoch {
+            return Ok(AddTexturesResponse {
+                textures: Vec::new(),
+                errors: Vec::new(),
+                duplicate_count: 0,
+            });
+        }
         let mut current: HashSet<String> = store
             .textures
             .iter()
@@ -164,12 +176,9 @@ pub fn remove_textures(ids: Vec<u64>, state: State<'_, AppState>) -> Result<(), 
 
 #[tauri::command]
 pub fn clear_textures(state: State<'_, AppState>) -> Result<(), String> {
-    state
-        .0
-        .write()
-        .map_err(|_| message(AppError::State))?
-        .textures
-        .clear();
+    let mut store = state.0.write().map_err(|_| message(AppError::State))?;
+    store.textures_epoch += 1;
+    store.textures.clear();
     Ok(())
 }
 
@@ -181,14 +190,17 @@ pub async fn resize_textures(
 ) -> Result<Vec<TextureInfo>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if width == 0 || height == 0 || width > 32_768 || height > 32_768 {
-            return Err(AppError::Invalid("贴图宽高必须在 1 到 32768 之间。".into()));
-        }
+        crate::models::validate_canvas(width, height)?;
         let mut store = state.0.write().map_err(|_| AppError::State)?;
         for texture in &mut store.textures {
             if texture.image.dimensions() != (width, height) {
-                texture.image =
-                    image::imageops::resize(&texture.image, width, height, FilterType::Lanczos3);
+                texture.image = image::imageops::resize(
+                    texture.image.as_ref(),
+                    width,
+                    height,
+                    FilterType::Lanczos3,
+                )
+                .into();
             }
         }
         store
@@ -206,18 +218,23 @@ pub async fn resize_textures(
 pub async fn set_base_texture(
     path: String,
     state: State<'_, AppState>,
-) -> Result<TextureInfo, String> {
+) -> Result<Option<TextureInfo>, String> {
     let state = state.inner().clone();
+    let (id, revision) = {
+        let mut store = state.0.write().map_err(|_| message(AppError::State))?;
+        store.base_revision += 1;
+        (next_id(&mut store), store.base_revision)
+    };
     tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(path);
-        let id = {
-            let mut store = state.0.write().map_err(|_| AppError::State)?;
-            next_id(&mut store)
-        };
         let asset = load_texture_asset(&path, id)?;
         let info = texture_info_with_max_edge(&asset, 2048)?;
-        state.0.write().map_err(|_| AppError::State)?.base = Some(asset);
-        Ok::<_, AppError>(info)
+        let committed = state
+            .0
+            .write()
+            .map_err(|_| AppError::State)?
+            .commit_base(revision, asset);
+        Ok::<_, AppError>(committed.then_some(info))
     })
     .await
     .map_err(message)?
@@ -226,7 +243,11 @@ pub async fn set_base_texture(
 
 #[tauri::command]
 pub fn clear_base_texture(state: State<'_, AppState>) -> Result<(), String> {
-    state.0.write().map_err(|_| message(AppError::State))?.base = None;
+    state
+        .0
+        .write()
+        .map_err(|_| message(AppError::State))?
+        .clear_base();
     Ok(())
 }
 
@@ -248,10 +269,10 @@ pub async fn build_preview(
 ) -> Result<PreviewResponse, String> {
     let project = snapshot(state.inner()).map_err(message)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let build = build_atlas(&project, &options, false)?;
+        let (build, width, height) = render_preview(&project, &options, 2048)?;
         Ok::<_, AppError>(PreviewResponse {
-            width: build.image.width(),
-            height: build.image.height(),
+            width,
+            height,
             preview_data_url: image_data_url(&build.image, 2048)?,
             placements: build.placements,
             grid: build.grid,
@@ -294,9 +315,13 @@ fn export_project(project: ProjectSnapshot, request: ExportRequest) -> AppResult
 
     if !is_png {
         if let (Some(base), Some(grid)) = (&project.base, build.grid) {
-            if let Some(reason) =
-                patch_blocker(base, grid, build.image.width(), build.image.height())
-            {
+            if let Some(reason) = patch_blocker(
+                base,
+                grid,
+                build.image.width(),
+                build.image.height(),
+                &request.format,
+            ) {
                 mode = format!("full-encode: {reason}");
                 actual_format = write_dds(&output, &build.image, &request.format, quality)?;
             } else {
@@ -351,4 +376,97 @@ fn export_project(project: ProjectSnapshot, request: ExportRequest) -> AppResult
         preserved_outside_slots,
         diagnostics,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{BuildOptions, SlotAssignment, TextureAsset, TextureStore};
+    use image::{Rgba, RgbaImage};
+    use std::sync::Arc;
+
+    fn texture(id: u64, width: u32, height: u32) -> TextureAsset {
+        TextureAsset {
+            id,
+            name: format!("{id}.png"),
+            path: PathBuf::from(format!("{id}.png")),
+            format: "PNG".into(),
+            image: RgbaImage::from_pixel(width, height, Rgba([20, 180, 60, 255])).into(),
+        }
+    }
+
+    #[test]
+    fn cleared_base_rejects_late_load_completion() {
+        let mut store = TextureStore {
+            base_revision: 1,
+            ..Default::default()
+        };
+        store.clear_base();
+        assert!(!store.commit_base(1, texture(99, 8, 4)));
+        assert!(store.base.is_none());
+        store.base_revision += 1;
+        assert!(store.commit_base(3, texture(100, 8, 4)));
+    }
+
+    #[test]
+    fn snapshot_shares_immutable_pixels() {
+        let state = AppState::default();
+        state.0.write().unwrap().textures.push(texture(1, 8, 4));
+        let project = snapshot(&state).unwrap();
+        assert!(Arc::ptr_eq(
+            &project.textures[0].image,
+            &state.0.read().unwrap().textures[0].image
+        ));
+    }
+
+    #[test]
+    fn export_honors_requested_dds_format() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut base = texture(99, 8, 4);
+        base.path = directory.path().join("base.dds");
+        write_dds(&base.path, &base.image, "dxt5", image_dds::Quality::Fast).unwrap();
+        let project = ProjectSnapshot {
+            textures: vec![texture(1, 4, 4)],
+            base: Some(base),
+        };
+        let request = ExportRequest {
+            output_path: directory
+                .path()
+                .join("out.dds")
+                .to_string_lossy()
+                .into_owned(),
+            format: "bc7-srgb".into(),
+            quality: "fast".into(),
+            export_json: false,
+            options: BuildOptions {
+                layout_mode: "auto".into(),
+                padding: 0,
+                columns: 2,
+                canvas_width: None,
+                canvas_height: None,
+                assignments: vec![SlotAssignment {
+                    texture_id: 1,
+                    slot: 1,
+                }],
+            },
+        };
+        let report = export_project(project.clone(), request.clone()).unwrap();
+        assert!(report.mode.starts_with("full-encode"));
+        let output = ddsfile::Dds::read(&mut std::io::BufReader::new(
+            std::fs::File::open(&report.output_path).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            image_dds::ImageFormat::BC7RgbaUnormSrgb,
+            image_dds::dds_image_format(&output).unwrap()
+        );
+        let same_format = ExportRequest {
+            format: "dxt5".into(),
+            ..request
+        };
+        assert_eq!(
+            "binary-patch",
+            export_project(project, same_format).unwrap().mode
+        );
+    }
 }

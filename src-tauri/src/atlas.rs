@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use image::{Rgba, RgbaImage, imageops};
+use image::{RgbaImage, imageops};
 
 use crate::models::{
     AppError, AppResult, AtlasBuild, AtlasPlacement, BuildOptions, ProjectSnapshot, SlotGridInfo,
@@ -12,10 +12,96 @@ pub fn build_atlas(
     options: &BuildOptions,
     require_all_assignments: bool,
 ) -> AppResult<AtlasBuild> {
+    render_plan(
+        project,
+        plan_atlas(project, options, require_all_assignments)?,
+        None,
+    )
+}
+
+struct AtlasPlan {
+    width: u32,
+    height: u32,
+    placements: Vec<AtlasPlacement>,
+    grid: Option<SlotGridInfo>,
+}
+
+fn plan_atlas(
+    project: &ProjectSnapshot,
+    options: &BuildOptions,
+    require_all_assignments: bool,
+) -> AppResult<AtlasPlan> {
     match &project.base {
         Some(base) => build_on_base(project, base, options, require_all_assignments),
         None => build_regular(&project.textures, options),
     }
+}
+
+/// Layout remains in source pixels; only the preview raster is downscaled.
+pub fn build_preview(
+    project: &ProjectSnapshot,
+    options: &BuildOptions,
+    max_edge: u32,
+) -> AppResult<(AtlasBuild, u32, u32)> {
+    let plan = plan_atlas(project, options, false)?;
+    let (width, height) = (plan.width, plan.height);
+    Ok((
+        render_plan(project, plan, Some(max_edge.max(1)))?,
+        width,
+        height,
+    ))
+}
+
+fn render_plan(
+    project: &ProjectSnapshot,
+    plan: AtlasPlan,
+    max_edge: Option<u32>,
+) -> AppResult<AtlasBuild> {
+    let scale = max_edge.map_or(1.0, |edge| {
+        (f64::from(edge) / f64::from(plan.width.max(plan.height))).min(1.0)
+    });
+    let scaled = |value: u32| (f64::from(value) * scale).round() as u32;
+    let mut atlas = RgbaImage::new(scaled(plan.width).max(1), scaled(plan.height).max(1));
+    let mut draw = |source: &RgbaImage, x: u32, y: u32, replace: bool| {
+        let (sx, sy) = (scaled(x), scaled(y));
+        let (width, height) = (
+            (scaled(x + source.width()) - sx).max(1),
+            (scaled(y + source.height()) - sy).max(1),
+        );
+        let resized;
+        let image = if scale < 1.0 {
+            resized = imageops::resize(source, width, height, imageops::FilterType::Triangle);
+            &resized
+        } else {
+            source
+        };
+        if replace {
+            imageops::replace(&mut atlas, image, i64::from(sx), i64::from(sy));
+        } else {
+            imageops::overlay(&mut atlas, image, i64::from(sx), i64::from(sy));
+        }
+    };
+    if let Some(base) = &project.base {
+        draw(&base.image, 0, 0, true);
+    }
+    let textures: HashMap<_, _> = project
+        .textures
+        .iter()
+        .map(|texture| (texture.id, texture))
+        .collect();
+    for placement in &plan.placements {
+        draw(
+            &textures[&placement.texture_id].image,
+            placement.x,
+            placement.y,
+            project.base.is_some(),
+        );
+    }
+    Ok(AtlasBuild {
+        image: atlas,
+        placements: plan.placements,
+        grid: plan.grid,
+    })
 }
 
 pub fn get_slot_grid(base: &TextureAsset, textures: &[TextureAsset]) -> AppResult<SlotGridInfo> {
@@ -50,7 +136,7 @@ pub fn get_slot_grid(base: &TextureAsset, textures: &[TextureAsset]) -> AppResul
     })
 }
 
-fn build_regular(textures: &[TextureAsset], options: &BuildOptions) -> AppResult<AtlasBuild> {
+fn build_regular(textures: &[TextureAsset], options: &BuildOptions) -> AppResult<AtlasPlan> {
     if textures.is_empty() {
         return Err(AppError::Invalid("请先添加至少一张贴图。".into()));
     }
@@ -80,7 +166,6 @@ fn build_regular(textures: &[TextureAsset], options: &BuildOptions) -> AppResult
     }
     validate_canvas(canvas_width, canvas_height)?;
 
-    let mut atlas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([0, 0, 0, 0]));
     let mut placements = Vec::with_capacity(textures.len());
     for (index, texture) in textures.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| AppError::Invalid("贴图数量过多。".into()))?;
@@ -88,12 +173,12 @@ fn build_regular(textures: &[TextureAsset], options: &BuildOptions) -> AppResult
         let row = index / columns;
         let x = column * (cell_width + options.padding);
         let y = row * (cell_height + options.padding);
-        imageops::overlay(&mut atlas, &texture.image, i64::from(x), i64::from(y));
         placements.push(placement(texture, x, y, None));
     }
 
-    Ok(AtlasBuild {
-        image: atlas,
+    Ok(AtlasPlan {
+        width: canvas_width,
+        height: canvas_height,
         placements,
         grid: None,
     })
@@ -104,7 +189,7 @@ fn build_on_base(
     base: &TextureAsset,
     options: &BuildOptions,
     require_all_assignments: bool,
-) -> AppResult<AtlasBuild> {
+) -> AppResult<AtlasPlan> {
     let target_width = options.canvas_width.unwrap_or(base.image.width());
     let target_height = options.canvas_height.unwrap_or(base.image.height());
     if target_width < base.image.width() || target_height < base.image.height() {
@@ -115,12 +200,11 @@ fn build_on_base(
         )));
     }
     validate_canvas(target_width, target_height)?;
-    let mut atlas = RgbaImage::from_pixel(target_width, target_height, Rgba([0, 0, 0, 0]));
-    imageops::replace(&mut atlas, &base.image, 0, 0);
 
     if project.textures.is_empty() {
-        return Ok(AtlasBuild {
-            image: atlas,
+        return Ok(AtlasPlan {
+            width: target_width,
+            height: target_height,
             placements: Vec::new(),
             grid: None,
         });
@@ -164,7 +248,6 @@ fn build_on_base(
         let zero_based = assignment.slot - 1;
         let x = (zero_based % grid.columns) * grid.slot_width;
         let y = (zero_based / grid.columns) * grid.slot_height;
-        imageops::replace(&mut atlas, &texture.image, i64::from(x), i64::from(y));
         placements.push(placement(texture, x, y, Some(assignment.slot)));
     }
 
@@ -176,8 +259,9 @@ fn build_on_base(
         )));
     }
 
-    Ok(AtlasBuild {
-        image: atlas,
+    Ok(AtlasPlan {
+        width: target_width,
+        height: target_height,
         placements,
         grid: Some(grid),
     })
@@ -240,7 +324,7 @@ mod tests {
             path: PathBuf::from(format!("texture-{id}.png")),
             name: format!("texture-{id}.png"),
             format: "PNG".into(),
-            image: RgbaImage::from_pixel(width, height, Rgba(color)),
+            image: RgbaImage::from_pixel(width, height, Rgba(color)).into(),
         }
     }
 
@@ -295,5 +379,42 @@ mod tests {
         let result = build_atlas(&project, &opts, true).unwrap();
         assert_eq!([8, 9, 10, 255], result.image.get_pixel(0, 0).0);
         assert_eq!([0, 0, 0, 0], result.image.get_pixel(4, 0).0);
+    }
+
+    #[test]
+    fn preview_uses_small_raster_and_original_coordinates() {
+        let project = ProjectSnapshot {
+            textures: vec![
+                texture(1, 256, 256, [255, 0, 0, 255]),
+                texture(2, 256, 256, [0, 255, 0, 255]),
+            ],
+            base: None,
+        };
+        let (preview, width, height) = build_preview(&project, &options(), 64).unwrap();
+        assert_eq!((512, 256), (width, height));
+        assert_eq!((64, 32), preview.image.dimensions());
+        assert_eq!(256, preview.placements[1].x);
+        assert_eq!([0, 255, 0, 255], preview.image.get_pixel(48, 16).0);
+    }
+
+    #[test]
+    fn base_preview_preserves_transparency_and_expanded_canvas() {
+        let project = ProjectSnapshot {
+            textures: vec![texture(1, 4, 4, [0, 0, 0, 0])],
+            base: Some(texture(99, 8, 4, [255, 0, 0, 255])),
+        };
+        let mut opts = options();
+        opts.canvas_width = Some(16);
+        opts.canvas_height = Some(8);
+        opts.assignments.push(crate::models::SlotAssignment {
+            texture_id: 1,
+            slot: 2,
+        });
+        let (preview, width, height) = build_preview(&project, &opts, 8).unwrap();
+        assert_eq!((16, 8), (width, height));
+        assert_eq!((8, 4), preview.image.dimensions());
+        assert_eq!([255, 0, 0, 255], preview.image.get_pixel(0, 0).0);
+        assert_eq!([0, 0, 0, 0], preview.image.get_pixel(3, 0).0);
+        assert_eq!([0, 0, 0, 0], preview.image.get_pixel(7, 3).0);
     }
 }

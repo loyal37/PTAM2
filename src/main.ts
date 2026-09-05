@@ -102,7 +102,27 @@ const defaultSettings: PersistedSettings = {
 
 function loadSettings(): PersistedSettings {
   try {
-    return { ...defaultSettings, ...JSON.parse(localStorage.getItem("ptam2.settings") ?? "{}") };
+    const saved = JSON.parse(localStorage.getItem("ptam2.settings") ?? "{}");
+    const settings = { ...defaultSettings };
+    if (!saved || typeof saved !== "object") return settings;
+    const enums = {
+      layoutMode: ["auto", "horizontal", "vertical", "grid"],
+      canvasMode: ["auto", "1024", "2048", "4096", "8192", "custom"],
+      exportFormat: ["png", "dxt5", "bc7-linear", "bc7-srgb"],
+      quality: ["fast", "normal", "slow"],
+    };
+    for (const key of Object.keys(enums) as Array<keyof typeof enums>) {
+      if (enums[key].includes(saved[key])) settings[key] = saved[key];
+    }
+    const limits = { columns: [1, 64], padding: [0, 512], canvasWidth: [1, 32768], canvasHeight: [1, 32768], panelOpacity: [45, 100] };
+    for (const key of Object.keys(limits) as Array<keyof typeof limits>) {
+      if (typeof saved[key] === "number" && Number.isFinite(saved[key])) {
+        settings[key] = Math.min(limits[key][1], Math.max(limits[key][0], Math.round(saved[key])));
+      }
+    }
+    if (typeof saved.exportJson === "boolean") settings.exportJson = saved.exportJson;
+    if (typeof saved.backgroundPath === "string") settings.backgroundPath = saved.backgroundPath;
+    return settings;
   } catch {
     return { ...defaultSettings };
   }
@@ -126,6 +146,16 @@ type ActiveDrag =
 
 let activeDrag: ActiveDrag | null = null;
 let previewRequestRevision = 0;
+let textureRequestRevision = 0;
+let baseRequestRevision = 0;
+let backgroundRequestRevision = 0;
+let previewRunning = false;
+let previewQueued = false;
+let previewFrame = 0;
+const imageCache = new Map<string, HTMLImageElement>();
+const pendingRemovals = new Set<number>();
+let cancelBaseActivity: (() => void) | null = null;
+let cancelTextureActivity: (() => void) | null = null;
 let nextActivityId = 0;
 const backgroundActivities = new Map<number, string>();
 
@@ -140,7 +170,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="topbar-status" id="engine-activity" aria-live="polite" hidden><span class="status-dot"></span><span id="engine-status"></span></div>
       <div class="top-actions">
         <button class="icon-button" id="settings-button" title="设置" aria-label="打开设置" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25A3.75 3.75 0 1 0 12 15.75 3.75 3.75 0 0 0 12 8.25ZM20 13.2V10.8L17.9 10a6.2 6.2 0 0 0-.55-1.32l.92-2.06-1.7-1.7-2.05.93A6.2 6.2 0 0 0 13.2 5.3L12.4 3h-2.4l-.8 2.3a6.2 6.2 0 0 0-1.32.55l-2.06-.92-1.7 1.7L5.05 8.7A6.2 6.2 0 0 0 4.5 10L2.4 10.8v2.4l2.1.8c.13.46.32.9.55 1.32l-.92 2.06 1.7 1.7 2.05-.93c.42.24.86.42 1.32.55l.8 2.3h2.4l.8-2.3c.46-.13.9-.31 1.32-.55l2.06.93 1.7-1.7-.93-2.06c.24-.42.42-.86.55-1.32l2.1-.8Z" /></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.6 2.2-1.3.8-2.2-.6-3 5.2 1.6 1.6v1.6l-1.6 1.6 3 5.2 2.2-.6 1.3.8L9 23h6l.6-2.2 1.3-.8 2.2.6 3-5.2-1.6-1.6v-1.6l1.6-1.6-3-5.2-2.2.6-1.3-.8L15 3Z" transform="translate(1.2 -.6) scale(.9)"/><circle cx="12" cy="11.1" r="3"/></svg>
         </button>
       </div>
     </header>
@@ -163,29 +193,28 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
         <div class="section-divider"></div>
         <div class="section-heading compact">
-          <h2>底图槽位</h2>
+          <h2>底图</h2>
         </div>
         <div class="button-grid">
           <button id="base-button">选择底图</button>
           <button class="danger-button" id="clear-base-button">清除底图</button>
         </div>
         <div class="base-card" id="base-card" hidden></div>
-        <div class="slot-summary" id="slot-summary">添加底图与贴图后可拖拽分配槽位</div>
-        <button class="wide-button" id="auto-place-button">自动顺序放置</button>
+        <div class="slot-summary" id="slot-summary" hidden></div>
+        <button class="wide-button" id="auto-place-button" hidden>自动放置</button>
       </aside>
 
       <section class="preview-column glass">
         <div class="preview-header">
           <h2>预览</h2>
-          <div class="canvas-meta"><span id="canvas-dimensions">— × —</span><span id="canvas-mode-badge">等待生成</span></div>
+          <div class="canvas-meta"><span id="canvas-dimensions"></span></div>
         </div>
         <div class="preview-stage" id="preview-stage">
           <div class="stage-empty" id="stage-empty">
-            <div class="stage-orbit"><span></span><i></i></div>
-            <h3>添加贴图开始</h3>
+            <h3 id="stage-message">添加贴图</h3>
           </div>
           <div class="atlas-frame" id="atlas-frame" hidden>
-            <img id="preview-image" alt="图集预览" draggable="false" />
+            <canvas id="preview-image" aria-label="图集预览"></canvas>
             <div class="slot-overlay" id="slot-overlay"></div>
           </div>
           <div class="busy-overlay" id="busy-overlay" hidden><span class="spinner"></span><strong id="busy-label">正在处理</strong></div>
@@ -211,12 +240,12 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="settings-section">
         <h3>布局</h3>
         <div class="settings-grid">
-          <label>排列<select id="layout-mode">
+          <label id="layout-field">排列<select id="layout-mode">
             <option value="auto">自动网格</option><option value="horizontal">横向</option>
             <option value="vertical">纵向</option><option value="grid">固定列数</option>
           </select></label>
           <label id="columns-field">列数<input id="columns" type="number" min="1" max="64" /></label>
-          <label>间距<input id="padding" type="number" min="0" max="512" /></label>
+          <label id="padding-field">间距<input id="padding" type="number" min="0" max="512" /></label>
           <label>画布<select id="canvas-mode">
             <option value="auto">自动</option><option value="1024">1024 × 1024</option>
             <option value="2048">2048 × 2048</option><option value="4096">4096 × 4096</option>
@@ -250,7 +279,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button id="background-button">选择背景</button>
           <button class="danger-button" id="clear-background-button">清除背景</button>
         </div>
-        <label class="opacity-row"><span>面板透明度</span><input id="panel-opacity" type="range" min="45" max="100" /></label>
+        <label class="opacity-row"><span>面板不透明度</span><input id="panel-opacity" type="range" min="45" max="100" /></label>
       </div>
     </section>
   </div>
@@ -268,7 +297,7 @@ const textureList = $("#texture-list");
 const previewStage = $("#preview-stage");
 const atlasFrame = $("#atlas-frame");
 const slotOverlay = $("#slot-overlay");
-const previewImage = $("#preview-image") as HTMLImageElement;
+const previewImage = $("#preview-image") as HTMLCanvasElement;
 const modalRoot = $("#modal-root");
 const settingsOverlay = $("#settings-overlay");
 
@@ -343,6 +372,7 @@ function invalidatePreview(): void {
     return;
   }
   state.preview = null;
+  $("#stage-message").textContent = state.textures.length ? "生成预览" : "添加贴图";
   renderPreview();
 }
 
@@ -369,6 +399,7 @@ function buildOptions(includeAssignments = true) {
 }
 
 function renderTextures(): void {
+  pruneImageCache();
   $("#texture-count").textContent = String(state.textures.length);
   if (state.textures.length === 0) {
     textureList.innerHTML = `<div class="list-empty"><div class="empty-icon">◇</div><strong>点击“添加”选择贴图</strong></div>`;
@@ -376,7 +407,7 @@ function renderTextures(): void {
     textureList.innerHTML = state.textures.map((texture, index) => `
       <article class="texture-item ${state.selected.has(texture.id) ? "selected" : ""}" data-id="${texture.id}" draggable="${Boolean(state.base)}">
         <div class="texture-index">${String(index + 1).padStart(2, "0")}</div>
-        <img src="${texture.thumbnailDataUrl}" alt="" />
+        <img src="${texture.thumbnailDataUrl}" alt="" draggable="false" />
         <div class="texture-copy"><strong title="${escapeHtml(texture.path)}">${escapeHtml(texture.name)}</strong><span>${texture.width} × ${texture.height}</span></div>
         <span class="format-badge">${escapeHtml(texture.format)}</span>
         ${state.assignments.has(texture.id) ? `<span class="slot-pill">槽 ${state.assignments.get(texture.id)}</span>` : ""}
@@ -395,6 +426,7 @@ function renderBase(): void {
     card.innerHTML = `<img src="${state.base.thumbnailDataUrl}" alt="" /><div><strong>${escapeHtml(state.base.name)}</strong><span>${state.base.width} × ${state.base.height} · ${escapeHtml(state.base.format)}</span></div>`;
   }
   renderSlotSummary();
+  updateConditionalSettings();
   updateButtonState();
 }
 
@@ -413,13 +445,15 @@ function inferredGrid(): SlotGridInfo | null {
 
 function renderSlotSummary(): void {
   const summary = $("#slot-summary");
+  summary.hidden = !state.base;
+  $("#auto-place-button").hidden = !state.base;
   if (!state.base) {
-    summary.textContent = "选择底图后可拖入槽位";
+    summary.textContent = "";
     summary.className = "slot-summary";
     return;
   }
   if (state.textures.length === 0) {
-    summary.textContent = "底图已加载，请添加待合并贴图";
+    summary.textContent = "添加贴图";
     summary.className = "slot-summary";
     return;
   }
@@ -429,7 +463,7 @@ function renderSlotSummary(): void {
     summary.className = "slot-summary warning";
     return;
   }
-  summary.textContent = `${grid.columns} × ${grid.rows} 网格 · 已放置 ${state.assignments.size}/${state.textures.length}`;
+  summary.textContent = `${grid.columns} × ${grid.rows} · 已放置 ${state.assignments.size}/${state.textures.length}`;
   summary.className = state.assignments.size === state.textures.length ? "slot-summary ready" : "slot-summary";
 }
 
@@ -438,28 +472,91 @@ function renderPreview(): void {
   $("#stage-empty").toggleAttribute("hidden", Boolean(preview));
   atlasFrame.toggleAttribute("hidden", !preview);
   if (!preview) {
-    $("#canvas-dimensions").textContent = "— × —";
-    $("#canvas-mode-badge").textContent = "等待生成";
+    $("#canvas-dimensions").textContent = "";
     slotOverlay.innerHTML = "";
     return;
   }
-  previewImage.src = preview.previewDataUrl;
   $("#canvas-dimensions").textContent = `${preview.width} × ${preview.height}`;
-  $("#canvas-mode-badge").textContent = preview.grid ? "槽位模式" : "图集模式";
   fitAtlasFrame();
   renderSlots();
+  scheduleCanvasDraw();
 }
 
 function renderBasePreview(): void {
   if (!state.base) return;
+  const options = buildOptions();
+  const width = options.canvasWidth ?? state.base.width;
+  const height = options.canvasHeight ?? state.base.height;
+  const valid = width >= state.base.width && height >= state.base.height && width * height <= 134217728;
+  $("#stage-message").textContent = valid ? "添加贴图" : `画布需至少 ${state.base.width} × ${state.base.height}，且总像素不超过 128M`;
+  if (!valid) {
+    state.preview = null;
+    renderPreview();
+    updateButtonState();
+    return;
+  }
   state.preview = {
-    width: state.base.width,
-    height: state.base.height,
+    width,
+    height,
     previewDataUrl: state.base.thumbnailDataUrl,
     placements: [],
     grid: inferredGrid(),
   };
   renderPreview();
+  updateButtonState();
+}
+
+function pruneImageCache(): void {
+  const urls = new Set(state.textures.map((texture) => texture.thumbnailDataUrl));
+  if (state.base) urls.add(state.base.thumbnailDataUrl);
+  if (state.preview) urls.add(state.preview.previewDataUrl);
+  for (const url of imageCache.keys()) if (!urls.has(url)) imageCache.delete(url);
+}
+
+function cachedImage(url: string): HTMLImageElement | null {
+  let image = imageCache.get(url);
+  if (!image) {
+    image = new Image();
+    image.onload = scheduleCanvasDraw;
+    image.src = url;
+    imageCache.set(url, image);
+  }
+  return image.complete && image.naturalWidth > 0 ? image : null;
+}
+
+function scheduleCanvasDraw(): void {
+  if (previewFrame) return;
+  previewFrame = requestAnimationFrame(() => {
+    previewFrame = 0;
+    const preview = state.preview;
+    if (!preview) return;
+    const scale = Math.min(1, 2048 / Math.max(preview.width, preview.height));
+    previewImage.width = Math.max(1, Math.round(preview.width * scale));
+    previewImage.height = Math.max(1, Math.round(preview.height * scale));
+    const context = previewImage.getContext("2d")!;
+    const draw = (url: string, x: number, y: number, width: number, height: number, replace = false) => {
+      const left = Math.round(x * scale), top = Math.round(y * scale);
+      const w = Math.max(1, Math.round((x + width) * scale) - left);
+      const h = Math.max(1, Math.round((y + height) * scale) - top);
+      if (replace) context.clearRect(left, top, w, h);
+      const image = cachedImage(url);
+      if (image) context.drawImage(image, left, top, w, h);
+    };
+    if (!state.base) {
+      draw(preview.previewDataUrl, 0, 0, preview.width, preview.height);
+      return;
+    }
+    draw(state.base.thumbnailDataUrl, 0, 0, state.base.width, state.base.height);
+    const grid = preview.grid;
+    if (!grid) return;
+    const textures = new Map(state.textures.map((texture) => [texture.id, texture]));
+    for (const [id, slot] of state.assignments) {
+      const texture = textures.get(id);
+      if (!texture) continue;
+      draw(texture.thumbnailDataUrl, ((slot - 1) % grid.columns) * grid.slotWidth,
+        Math.floor((slot - 1) / grid.columns) * grid.slotHeight, grid.slotWidth, grid.slotHeight, true);
+    }
+  });
 }
 
 function fitAtlasFrame(): void {
@@ -473,32 +570,42 @@ function fitAtlasFrame(): void {
 
 function renderSlots(): void {
   const preview = state.preview;
+  slotOverlay.innerHTML = "";
+  slotOverlay.hidden = !preview?.grid;
   if (!preview?.grid) {
-    slotOverlay.innerHTML = "";
     return;
   }
   const grid = preview.grid;
-  const occupied = new Map<number, TextureInfo>();
+  slotOverlay.style.width = `${grid.columns * grid.slotWidth / preview.width * 100}%`;
+  slotOverlay.style.height = `${grid.rows * grid.slotHeight / preview.height * 100}%`;
+  // Dense grids use hit testing, not one DOM node per empty slot.
+  slotOverlay.classList.toggle("dense-grid", grid.columns > 64 || grid.rows > 64);
+  slotOverlay.style.backgroundSize = `${100 / grid.columns}% ${100 / grid.rows}%`;
   for (const [textureId, slot] of state.assignments) {
-    const texture = state.textures.find((item) => item.id === textureId);
-    if (texture) occupied.set(slot, texture);
+    if (state.textures.some((texture) => texture.id === textureId)) updateSlotCell(slot);
   }
-  const cells: string[] = [];
-  for (let slot = 1; slot <= grid.columns * grid.rows; slot += 1) {
-    const zero = slot - 1;
-    const column = zero % grid.columns;
-    const row = Math.floor(zero / grid.columns);
-    const texture = occupied.get(slot);
-    const left = column * grid.slotWidth / preview.width * 100;
-    const top = row * grid.slotHeight / preview.height * 100;
-    const width = grid.slotWidth / preview.width * 100;
-    const height = grid.slotHeight / preview.height * 100;
-    cells.push(`<div class="slot-cell ${texture ? "occupied" : ""}" data-slot="${slot}" draggable="${Boolean(texture)}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%">
-      ${texture ? `<img class="slot-texture-preview" src="${texture.thumbnailDataUrl}" alt="" draggable="false" />` : ""}
-      <span>${slot}</span>${texture ? `<strong>${escapeHtml(texture.name)}</strong>` : ""}
-    </div>`);
-  }
-  slotOverlay.innerHTML = cells.join("");
+}
+
+function positionSlot(cell: HTMLElement, slot: number): void {
+  const grid = state.preview?.grid;
+  if (!grid) return;
+  cell.style.left = `${((slot - 1) % grid.columns) / grid.columns * 100}%`;
+  cell.style.top = `${Math.floor((slot - 1) / grid.columns) / grid.rows * 100}%`;
+  cell.style.width = `${100 / grid.columns}%`;
+  cell.style.height = `${100 / grid.rows}%`;
+}
+
+function slotAtPointer(event: MouseEvent): number | null {
+  const grid = state.preview?.grid;
+  if (!grid || state.busy) return null;
+  const rect = slotOverlay.getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null;
+  return Math.floor(y / rect.height * grid.rows) * grid.columns + Math.floor(x / rect.width * grid.columns) + 1;
+}
+
+function clearDragHighlight(): void {
+  slotOverlay.querySelector(".slot-hover")?.remove();
 }
 
 function textureAtSlot(slot: number): TextureInfo | null {
@@ -510,13 +617,19 @@ function textureAtSlot(slot: number): TextureInfo | null {
 }
 
 function updateSlotCell(slot: number): void {
-  const cell = slotOverlay.querySelector<HTMLElement>(`.slot-cell[data-slot="${slot}"]`);
-  if (!cell) return;
+  let cell = slotOverlay.querySelector<HTMLElement>(`.slot-cell[data-slot="${slot}"]`);
   const texture = textureAtSlot(slot);
-  cell.classList.toggle("occupied", Boolean(texture));
-  cell.draggable = Boolean(texture);
-  cell.innerHTML = `${texture ? `<img class="slot-texture-preview" src="${texture.thumbnailDataUrl}" alt="" draggable="false" />` : ""}
-    <span>${slot}</span>${texture ? `<strong>${escapeHtml(texture.name)}</strong>` : ""}`;
+  if (!texture) { cell?.remove(); return; }
+  if (!cell) {
+    cell = document.createElement("div");
+    cell.className = "slot-cell occupied";
+    cell.dataset.slot = String(slot);
+    cell.draggable = true;
+    positionSlot(cell, slot);
+    slotOverlay.append(cell);
+  }
+  cell.title = texture.name;
+  cell.innerHTML = `<span>${slot}</span><strong>${escapeHtml(texture.name)}</strong>`;
 }
 
 function updateTextureSlotBadge(textureId: number): void {
@@ -535,6 +648,8 @@ function updateAssignmentUi(textureIds: Array<number | undefined>, slots: Array<
   new Set(textureIds.filter((id): id is number => id !== undefined)).forEach(updateTextureSlotBadge);
   new Set(slots.filter((slot): slot is number => slot !== undefined)).forEach(updateSlotCell);
   renderSlotSummary();
+  scheduleCanvasDraw();
+  updateButtonState();
 }
 
 function updateButtonState(): void {
@@ -542,12 +657,14 @@ function updateButtonState(): void {
   ($("#add-button") as HTMLButtonElement).disabled = disabled || state.loadingTextures > 0;
   ($("#base-button") as HTMLButtonElement).disabled = disabled || state.loadingBase > 0;
   ($("#remove-button") as HTMLButtonElement).disabled = disabled || state.selected.size === 0;
-  ($("#resize-button") as HTMLButtonElement).disabled = disabled || state.textures.length === 0;
-  ($("#clear-button") as HTMLButtonElement).disabled = disabled || state.textures.length === 0;
-  ($("#clear-base-button") as HTMLButtonElement).disabled = disabled || !state.base;
+  ($("#resize-button") as HTMLButtonElement).disabled = disabled || state.loadingTextures > 0 || state.textures.length === 0;
+  ($("#clear-button") as HTMLButtonElement).disabled = disabled || (state.textures.length === 0 && state.loadingTextures === 0);
+  ($("#clear-base-button") as HTMLButtonElement).disabled = disabled || (!state.base && state.loadingBase === 0);
   ($("#auto-place-button") as HTMLButtonElement).disabled = disabled || !inferredGrid() || state.textures.length === 0;
   ($("#preview-button") as HTMLButtonElement).disabled = disabled || (state.textures.length === 0 && !state.base);
-  ($("#export-button") as HTMLButtonElement).disabled = disabled || (state.textures.length === 0 && !state.base);
+  $("#preview-button").hidden = Boolean(state.base);
+  const baseInvalid = Boolean(state.base && (!state.preview || (state.textures.length && (!inferredGrid() || state.assignments.size !== state.textures.length))));
+  ($("#export-button") as HTMLButtonElement).disabled = disabled || state.loadingTextures > 0 || state.loadingBase > 0 || baseInvalid || (state.textures.length === 0 && !state.base);
   ($("#clear-background-button") as HTMLButtonElement).disabled = disabled || !state.settings.backgroundPath;
 }
 
@@ -568,6 +685,7 @@ function applySettingsToUi(): void {
 }
 
 function updateConditionalSettings(): void {
+  for (const id of ["#layout-field", "#columns-field", "#padding-field"]) $(id).hidden = Boolean(state.base);
   $("#columns-field").classList.toggle("muted-field", state.settings.layoutMode !== "grid");
   ($("#columns") as HTMLInputElement).disabled = state.settings.layoutMode !== "grid";
   $("#custom-size-fields").classList.toggle("visible", state.settings.canvasMode === "custom");
@@ -575,79 +693,89 @@ function updateConditionalSettings(): void {
   ($("#quality") as HTMLSelectElement).disabled = state.settings.exportFormat === "png";
 }
 
-async function generatePreview(silent = false, blocking = true): Promise<void> {
+async function generatePreview(): Promise<void> {
   if (state.textures.length === 0 && !state.base) return;
   if (state.base) {
     renderBasePreview();
-    if (!silent) toast(`预览已生成：${state.base.width} × ${state.base.height}`, "success");
     return;
   }
+  if (previewRunning) { previewQueued = true; return; }
+  previewRunning = true;
   const revision = ++previewRequestRevision;
-  if (blocking) setBusy(true, "Rust 引擎正在生成预览");
+  const finishActivity = beginBackgroundActivity("生成预览…");
   try {
     const preview = await invoke<PreviewResponse>("build_preview", { options: buildOptions() });
     if (revision !== previewRequestRevision) return;
     state.preview = preview;
     renderPreview();
-    if (!silent) toast(`预览已生成：${state.preview.width} × ${state.preview.height}`, "success");
   } catch (error) {
     if (revision === previewRequestRevision) toast(errorText(error), "error", 6500);
   } finally {
-    if (blocking) setBusy(false);
+    previewRunning = false;
+    finishActivity();
+    if (previewQueued) { previewQueued = false; void generatePreview(); }
   }
 }
 
 async function chooseTextures(): Promise<void> {
+  const revision = ++textureRequestRevision;
   const paths = await open({
     multiple: true,
     filters: [{ name: "贴图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
-  if (!paths) return;
+  if (!paths || revision !== textureRequestRevision) return;
   const selectedPaths = Array.isArray(paths) ? paths : [paths];
   state.loadingTextures += 1;
   updateButtonState();
   const finishActivity = beginBackgroundActivity(`后台加载 ${selectedPaths.length} 张贴图…`);
+  cancelTextureActivity = finishActivity;
   try {
     const response = await invoke<AddTexturesResponse>("add_textures", { paths: selectedPaths });
+    if (revision !== textureRequestRevision) return;
     state.textures.push(...response.textures);
-    invalidatePreview();
+    if (response.textures.length) invalidatePreview();
     renderTextures();
     renderSlotSummary();
-    if (response.textures.length) toast(`已添加 ${response.textures.length} 张贴图`, "success");
     if (response.duplicateCount) toast(`已忽略 ${response.duplicateCount} 个重复文件`, "info");
     if (response.errors.length) {
       toast(response.errors.map((item) => `${item.path}: ${item.message}`).join("\n"), "error", 8000);
     }
   } catch (error) {
-    toast(errorText(error), "error");
+    if (revision === textureRequestRevision) toast(errorText(error), "error");
   } finally {
-    state.loadingTextures = Math.max(0, state.loadingTextures - 1);
+    if (revision === textureRequestRevision) state.loadingTextures = 0;
     finishActivity();
     updateButtonState();
   }
 }
 
 async function removeSelected(): Promise<void> {
-  if (!state.selected.size) return;
-  const ids = Array.from(state.selected);
+  if (state.busy || !state.selected.size) return;
+  const ids = Array.from(state.selected).filter((id) => !pendingRemovals.has(id));
+  if (!ids.length) return;
+  ids.forEach((id) => pendingRemovals.add(id));
+  const removed = new Set(ids);
   try {
     await invoke("remove_textures", { ids });
-    state.textures = state.textures.filter((texture) => !state.selected.has(texture.id));
-    ids.forEach((id) => state.assignments.delete(id));
-    state.selected.clear();
-    state.assignments.clear();
+    state.textures = state.textures.filter((texture) => !removed.has(texture.id));
+    ids.forEach((id) => { state.assignments.delete(id); state.selected.delete(id); });
     invalidatePreview();
     renderTextures();
     renderSlotSummary();
   } catch (error) {
     toast(errorText(error), "error");
+  } finally {
+    ids.forEach((id) => pendingRemovals.delete(id));
   }
 }
 
 async function clearTextures(): Promise<void> {
-  if (!state.textures.length) return;
+  if (state.busy) return;
+  textureRequestRevision += 1;
+  cancelTextureActivity?.();
   try {
     await invoke("clear_textures");
+    state.loadingTextures = 0;
     state.textures = [];
     state.selected.clear();
     state.assignments.clear();
@@ -660,33 +788,40 @@ async function clearTextures(): Promise<void> {
 }
 
 async function chooseBase(): Promise<void> {
+  const revision = ++baseRequestRevision;
   const path = await open({
     multiple: false,
     filters: [{ name: "底图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
-  if (!path || Array.isArray(path)) return;
+  if (!path || Array.isArray(path) || revision !== baseRequestRevision) return;
   state.loadingBase += 1;
   updateButtonState();
   const finishActivity = beginBackgroundActivity("后台加载底图…");
+  cancelBaseActivity = finishActivity;
   try {
-    state.base = await invoke<TextureInfo>("set_base_texture", { path });
+    const base = await invoke<TextureInfo | null>("set_base_texture", { path });
+    if (!base || revision !== baseRequestRevision) return;
+    state.base = base;
     state.assignments.clear();
     invalidatePreview();
     renderBase();
     renderTextures();
-    toast("底图模式已启用", "success");
   } catch (error) {
-    toast(errorText(error), "error");
+    if (revision === baseRequestRevision) toast(errorText(error), "error");
   } finally {
-    state.loadingBase = Math.max(0, state.loadingBase - 1);
+    if (revision === baseRequestRevision) state.loadingBase = 0;
     finishActivity();
     updateButtonState();
   }
 }
 
 async function clearBase(): Promise<void> {
+  if (state.busy) return;
+  baseRequestRevision += 1;
+  cancelBaseActivity?.();
   try {
     await invoke("clear_base_texture");
+    state.loadingBase = 0;
     state.base = null;
     state.assignments.clear();
     invalidatePreview();
@@ -709,9 +844,13 @@ function autoPlace(): void {
   renderTextures();
   renderSlotSummary();
   renderSlots();
+  scheduleCanvasDraw();
+  updateButtonState();
 }
 
 function assignTexture(textureId: number, targetSlot: number): void {
+  const grid = state.preview?.grid;
+  if (state.busy || !grid || targetSlot < 1 || targetSlot > grid.columns * grid.rows || !state.textures.some((texture) => texture.id === textureId)) return;
   const previousSlot = state.assignments.get(textureId);
   let displacedTextureId: number | undefined;
   for (const [id, slot] of state.assignments) {
@@ -726,7 +865,7 @@ function assignTexture(textureId: number, targetSlot: number): void {
 }
 
 function moveSlot(sourceSlot: number, targetSlot: number): void {
-  if (sourceSlot === targetSlot) return;
+  if (state.busy || sourceSlot === targetSlot) return;
   const source = Array.from(state.assignments).find(([, slot]) => slot === sourceSlot);
   if (!source) return;
   const target = Array.from(state.assignments).find(([, slot]) => slot === targetSlot);
@@ -745,6 +884,7 @@ function showResizeDialog(): void {
     <div class="modal-actions"><button data-close>取消</button><button class="accent-button" id="confirm-resize">应用尺寸</button></div>
   </div></div>`;
   const widthInput = $("#resize-width") as HTMLInputElement;
+  widthInput.focus();
   const heightInput = $("#resize-height") as HTMLInputElement;
   const lock = $("#lock-aspect") as HTMLInputElement;
   const aspect = first.width / first.height;
@@ -758,7 +898,7 @@ function showResizeDialog(): void {
   $("#confirm-resize").addEventListener("click", async () => {
     const width = Number(widthInput.value);
     const height = Number(heightInput.value);
-    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 32768 || height > 32768 || width * height > 134217728) {
       toast("请输入有效的宽高", "error");
       return;
     }
@@ -770,7 +910,6 @@ function showResizeDialog(): void {
       invalidatePreview();
       renderTextures();
       renderSlotSummary();
-      toast(`已统一为 ${width} × ${height}`, "success");
     } catch (error) {
       toast(errorText(error), "error");
     } finally {
@@ -802,7 +941,7 @@ async function exportAtlas(): Promise<void> {
     filters: [{ name: isPng ? "PNG 图像" : "DDS 贴图", extensions: [isPng ? "png" : "dds"] }],
   });
   if (!path) return;
-  setBusy(true, isPng ? "正在写入 PNG" : "正在压缩 DDS");
+  setBusy(true, isPng ? "正在导出 PNG" : "正在导出 DDS");
   try {
     const report = await invoke<ExportReport>("export_atlas", {
       request: {
@@ -814,7 +953,6 @@ async function exportAtlas(): Promise<void> {
       },
     });
     showExportReport(report);
-    toast("图集导出完成", "success");
   } catch (error) {
     toast(errorText(error), "error", 8000);
   } finally {
@@ -828,22 +966,26 @@ function showExportReport(report: ExportReport): void {
     ? `<div class="diagnostic-table">${report.diagnostics.map((item) => `<div><span>槽 ${item.slot}</span><strong>${escapeHtml(item.texture)}</strong><code>${item.method}</code></div>`).join("")}</div>`
     : "";
   modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal-card report-modal">
-    <div class="report-symbol ${patchMode ? "patch" : "success"}">${patchMode ? "BC" : "✓"}</div>
     <h2>导出完成</h2>
+    <div class="path-block"><code>${escapeHtml(report.outputPath)}</code>${report.jsonPath ? `<code>${escapeHtml(report.jsonPath)}</code>` : ""}</div>
+    <details class="export-details"><summary>详情</summary>
     <div class="report-grid"><div><span>尺寸</span><strong>${report.width} × ${report.height}</strong></div><div><span>格式</span><strong>${escapeHtml(report.format)}</strong></div><div><span>模式</span><strong>${escapeHtml(report.mode)}</strong></div><div><span>耗时</span><strong>${report.elapsedMs} ms</strong></div></div>
     ${patchMode ? `<p class="preserve-note">${report.preservedOutsideSlots ? "✓ 已验证：目标槽位之外的原始 DDS 字节完全不变" : "未执行字节保护验证"}</p>` : ""}
-    <div class="path-block"><span>输出文件</span><code>${escapeHtml(report.outputPath)}</code>${report.jsonPath ? `<span>坐标表</span><code>${escapeHtml(report.jsonPath)}</code>` : ""}</div>
     ${diagnostics}
+    </details>
     <div class="modal-actions"><button class="accent-button" data-close>完成</button></div>
   </div></div>`;
   modalRoot.querySelector("[data-close]")?.addEventListener("click", closeModal);
+  modalRoot.querySelector<HTMLButtonElement>("[data-close]")?.focus();
 }
 
 async function chooseBackground(): Promise<void> {
+  const revision = ++backgroundRequestRevision;
   const path = await open({ multiple: false, filters: [{ name: "背景图", extensions: ["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"] }] });
   if (!path || Array.isArray(path)) return;
   try {
     const dataUrl = await invoke<string>("read_background_image", { path });
+    if (revision !== backgroundRequestRevision) return;
     $("#background-art").style.backgroundImage = `linear-gradient(rgba(3, 9, 18, .40), rgba(3, 9, 18, .72)), url("${dataUrl}")`;
     state.settings.backgroundPath = path;
     persistSettings();
@@ -854,6 +996,7 @@ async function chooseBackground(): Promise<void> {
 }
 
 function clearBackground(): void {
+  backgroundRequestRevision += 1;
   state.settings.backgroundPath = null;
   $("#background-art").style.backgroundImage = "";
   persistSettings();
@@ -862,12 +1005,13 @@ function clearBackground(): void {
 
 async function restoreBackground(): Promise<void> {
   if (!state.settings.backgroundPath) return;
+  const revision = backgroundRequestRevision;
   try {
     const dataUrl = await invoke<string>("read_background_image", { path: state.settings.backgroundPath });
+    if (revision !== backgroundRequestRevision) return;
     $("#background-art").style.backgroundImage = `linear-gradient(rgba(3, 9, 18, .40), rgba(3, 9, 18, .72)), url("${dataUrl}")`;
   } catch {
-    state.settings.backgroundPath = null;
-    persistSettings();
+    // An offline or moved file must not erase the user's saved preference.
   }
 }
 
@@ -907,6 +1051,7 @@ function wireEvents(): void {
     renderTextures();
   });
   textureList.addEventListener("dragstart", (event) => {
+    if (state.busy || !state.preview?.grid) { event.preventDefault(); return; }
     const item = (event.target as HTMLElement).closest<HTMLElement>(".texture-item");
     if (!item || !event.dataTransfer) return;
     const textureId = Number(item.dataset.id);
@@ -920,9 +1065,10 @@ function wireEvents(): void {
   textureList.addEventListener("dragend", (event) => {
     (event.target as HTMLElement).closest<HTMLElement>(".texture-item")?.classList.remove("dragging");
     activeDrag = null;
-    slotOverlay.querySelectorAll(".drag-over").forEach((element) => element.classList.remove("drag-over"));
+    clearDragHighlight();
   });
   slotOverlay.addEventListener("dragstart", (event) => {
+    if (state.busy) { event.preventDefault(); return; }
     const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell.occupied");
     if (!cell || !event.dataTransfer) return;
     const sourceSlot = Number(cell.dataset.slot);
@@ -936,27 +1082,25 @@ function wireEvents(): void {
   slotOverlay.addEventListener("dragend", (event) => {
     (event.target as HTMLElement).closest<HTMLElement>(".slot-cell")?.classList.remove("dragging");
     activeDrag = null;
-    slotOverlay.querySelectorAll(".drag-over").forEach((element) => element.classList.remove("drag-over"));
+    clearDragHighlight();
   });
   slotOverlay.addEventListener("dragover", (event) => {
-    const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell");
-    if (!cell) return;
+    const slot = slotAtPointer(event);
+    if (!slot || !activeDrag) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    slotOverlay.querySelectorAll(".drag-over").forEach((element) => {
-      if (element !== cell) element.classList.remove("drag-over");
-    });
-    cell.classList.add("drag-over");
+    let hover = slotOverlay.querySelector<HTMLElement>(".slot-hover");
+    if (!hover) { hover = document.createElement("div"); hover.className = "slot-hover"; slotOverlay.append(hover); }
+    positionSlot(hover, slot);
   });
   slotOverlay.addEventListener("dragleave", (event) => {
-    (event.target as HTMLElement).closest<HTMLElement>(".slot-cell")?.classList.remove("drag-over");
+    if (!slotOverlay.contains(event.relatedTarget as Node | null)) clearDragHighlight();
   });
   slotOverlay.addEventListener("drop", (event) => {
-    const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell");
-    if (!cell || !event.dataTransfer) return;
+    const targetSlot = slotAtPointer(event);
+    if (!targetSlot || !event.dataTransfer) return;
     event.preventDefault();
-    cell.classList.remove("drag-over");
-    const targetSlot = Number(cell.dataset.slot);
+    clearDragHighlight();
     let textureId = Number(event.dataTransfer.getData("application/x-ptam-texture"));
     let sourceSlot = Number(event.dataTransfer.getData("application/x-ptam-slot"));
     const plain = event.dataTransfer.getData("text/plain");
@@ -969,23 +1113,28 @@ function wireEvents(): void {
     else if (sourceSlot) moveSlot(sourceSlot, targetSlot);
   });
 
-  const bindSetting = (selector: string, apply: (element: HTMLInputElement | HTMLSelectElement) => void) => {
+  const bindSetting = (selector: string, apply: (element: HTMLInputElement | HTMLSelectElement) => void, affectsLayout = true) => {
     $(selector).addEventListener("change", (event) => {
       apply(event.target as HTMLInputElement | HTMLSelectElement);
       persistSettings();
       updateConditionalSettings();
-      invalidatePreview();
+      if (affectsLayout) invalidatePreview();
     });
   };
   bindSetting("#layout-mode", (element) => state.settings.layoutMode = element.value);
-  bindSetting("#columns", (element) => state.settings.columns = Math.max(1, Number(element.value)));
-  bindSetting("#padding", (element) => state.settings.padding = Math.max(0, Number(element.value)));
+  const numericSetting = (element: HTMLInputElement | HTMLSelectElement, min: number, max: number) => {
+    const value = Math.min(max, Math.max(min, Math.round(Number(element.value) || min)));
+    element.value = String(value);
+    return value;
+  };
+  bindSetting("#columns", (element) => state.settings.columns = numericSetting(element, 1, 64));
+  bindSetting("#padding", (element) => state.settings.padding = numericSetting(element, 0, 512));
   bindSetting("#canvas-mode", (element) => state.settings.canvasMode = element.value);
-  bindSetting("#canvas-width", (element) => state.settings.canvasWidth = Math.max(1, Number(element.value)));
-  bindSetting("#canvas-height", (element) => state.settings.canvasHeight = Math.max(1, Number(element.value)));
-  bindSetting("#export-format", (element) => state.settings.exportFormat = element.value);
-  bindSetting("#quality", (element) => state.settings.quality = element.value);
-  bindSetting("#export-json", (element) => state.settings.exportJson = (element as HTMLInputElement).checked);
+  bindSetting("#canvas-width", (element) => state.settings.canvasWidth = numericSetting(element, 1, 32768));
+  bindSetting("#canvas-height", (element) => state.settings.canvasHeight = numericSetting(element, 1, 32768));
+  bindSetting("#export-format", (element) => state.settings.exportFormat = element.value, false);
+  bindSetting("#quality", (element) => state.settings.quality = element.value, false);
+  bindSetting("#export-json", (element) => state.settings.exportJson = (element as HTMLInputElement).checked, false);
   $("#panel-opacity").addEventListener("input", (event) => {
     state.settings.panelOpacity = Number((event.target as HTMLInputElement).value);
     document.documentElement.style.setProperty("--panel-alpha", String(state.settings.panelOpacity / 100));
@@ -993,11 +1142,24 @@ function wireEvents(): void {
   });
   window.addEventListener("resize", fitAtlasFrame);
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      if (!settingsOverlay.hidden) closeSettings();
-      else closeModal();
+    const dialog = modalRoot.firstElementChild ?? (!settingsOverlay.hidden ? settingsOverlay : null);
+    if (event.key === "Tab" && dialog) {
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, [tabindex="0"]')).filter((element) => element.getClientRects().length > 0);
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault(); last?.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault(); first?.focus();
+      }
     }
-    if (event.key === "Delete" && state.selected.size) void removeSelected();
+    if (event.key === "Escape") {
+      if (modalRoot.firstElementChild) closeModal();
+      else if (!settingsOverlay.hidden) closeSettings();
+    }
+    const editing = (event.target as HTMLElement)?.closest('input, textarea, select, [contenteditable="true"]');
+    if (event.key === "Delete" && !editing && !dialog && !state.busy && !event.repeat && state.selected.size) {
+      event.preventDefault(); void removeSelected();
+    }
   });
 }
 
