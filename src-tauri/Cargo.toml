@@ -15,6 +15,7 @@ tauri-build = { version = "2.5.3", features = [] }
 [dependencies]
 base64 = "0.22.1"
 ddsfile = "=0.5.2"
+drag = "2.1.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "jpeg", "png", "tga", "tiff", "webp"] }
 image_dds = "0.7.2"
 rayon = "1.11.0"

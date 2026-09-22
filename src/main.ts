@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
@@ -144,7 +145,6 @@ type ActiveDrag =
   | { kind: "texture"; textureId: number }
   | { kind: "slot"; sourceSlot: number };
 
-let activeDrag: ActiveDrag | null = null;
 let previewRequestRevision = 0;
 let textureRequestRevision = 0;
 let baseRequestRevision = 0;
@@ -156,6 +156,14 @@ const imageCache = new Map<string, HTMLImageElement>();
 const pendingRemovals = new Set<number>();
 let cancelBaseActivity: (() => void) | null = null;
 let cancelTextureActivity: (() => void) | null = null;
+let textureImportQueue: Promise<void> = Promise.resolve();
+let pointerDrag: { pointerId: number; startX: number; startY: number; source: HTMLElement; action: ActiveDrag | { kind: "export" }; moved: boolean } | null = null;
+let suppressDragClick = false;
+let exportRevision = 0;
+let exportPreparation: { revision: number; promise: Promise<{ token: number; name: string }> } | null = null;
+let nativeDragRunning = false;
+let exportGesture = 0;
+const textureExtensions = /\.(dds|png|jpe?g|bmp|tga|tiff?|webp)$/i;
 let nextActivityId = 0;
 const backgroundActivities = new Map<number, string>();
 
@@ -188,10 +196,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button class="danger-button" id="clear-button">清空</button>
         </div>
         <div class="texture-list" id="texture-list">
-          <div class="list-empty"><div class="empty-icon">◇</div><strong>点击“添加”选择贴图</strong></div>
+          <div class="list-empty"><strong>拖入贴图或点击添加</strong></div>
         </div>
 
         <div class="section-divider"></div>
+        <div id="base-drop-zone">
         <div class="section-heading compact">
           <h2>底图</h2>
         </div>
@@ -202,19 +211,20 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="base-card" id="base-card" hidden></div>
         <div class="slot-summary" id="slot-summary" hidden></div>
         <button class="wide-button" id="auto-place-button" hidden>自动放置</button>
+        </div>
       </aside>
 
       <section class="preview-column glass">
         <div class="preview-header">
           <h2>预览</h2>
-          <div class="canvas-meta"><span id="canvas-dimensions"></span></div>
+          <div class="canvas-meta"><span id="canvas-dimensions"></span><button class="icon-button drag-export-handle" id="drag-export-button" title="拖到桌面或文件夹导出" aria-label="拖出图集" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 4h7v7M20 4l-9 9M9 5H4v15h15v-5"/></svg></button></div>
         </div>
         <div class="preview-stage" id="preview-stage">
           <div class="stage-empty" id="stage-empty">
             <h3 id="stage-message">添加贴图</h3>
           </div>
           <div class="atlas-frame" id="atlas-frame" hidden>
-            <canvas id="preview-image" aria-label="图集预览"></canvas>
+            <canvas id="preview-image" aria-label="图集预览" title="拖到窗口外导出；槽位内拖动可移动贴图"></canvas>
             <div class="slot-overlay" id="slot-overlay"></div>
           </div>
           <div class="busy-overlay" id="busy-overlay" hidden><span class="spinner"></span><strong id="busy-label">正在处理</strong></div>
@@ -222,7 +232,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="preview-footer">
           <div class="footer-actions">
             <button class="large-button" id="preview-button">生成预览</button>
-            <button class="large-button accent-button" id="export-button">导出图集 <span>→</span></button>
+            <button class="large-button accent-button" id="export-button" title="点击保存，或拖到桌面／文件夹导出">导出图集 <span>→</span></button>
           </div>
         </div>
       </section>
@@ -366,6 +376,7 @@ function beginBackgroundActivity(label: string): () => void {
 }
 
 function invalidatePreview(): void {
+  invalidateDragExport();
   previewRequestRevision += 1;
   if (state.base) {
     renderBasePreview();
@@ -402,10 +413,10 @@ function renderTextures(): void {
   pruneImageCache();
   $("#texture-count").textContent = String(state.textures.length);
   if (state.textures.length === 0) {
-    textureList.innerHTML = `<div class="list-empty"><div class="empty-icon">◇</div><strong>点击“添加”选择贴图</strong></div>`;
+    textureList.innerHTML = `<div class="list-empty"><strong>拖入贴图或点击添加</strong></div>`;
   } else {
     textureList.innerHTML = state.textures.map((texture, index) => `
-      <article class="texture-item ${state.selected.has(texture.id) ? "selected" : ""}" data-id="${texture.id}" draggable="${Boolean(state.base)}">
+      <article class="texture-item ${state.selected.has(texture.id) ? "selected" : ""}" data-id="${texture.id}" data-draggable="${Boolean(state.base)}" draggable="false">
         <div class="texture-index">${String(index + 1).padStart(2, "0")}</div>
         <img src="${texture.thumbnailDataUrl}" alt="" draggable="false" />
         <div class="texture-copy"><strong title="${escapeHtml(texture.path)}">${escapeHtml(texture.name)}</strong><span>${texture.width} × ${texture.height}</span></div>
@@ -480,6 +491,7 @@ function renderPreview(): void {
   fitAtlasFrame();
   renderSlots();
   scheduleCanvasDraw();
+  updateButtonState();
 }
 
 function renderBasePreview(): void {
@@ -624,7 +636,7 @@ function updateSlotCell(slot: number): void {
     cell = document.createElement("div");
     cell.className = "slot-cell occupied";
     cell.dataset.slot = String(slot);
-    cell.draggable = true;
+    cell.draggable = false;
     positionSlot(cell, slot);
     slotOverlay.append(cell);
   }
@@ -645,6 +657,7 @@ function updateTextureSlotBadge(textureId: number): void {
 }
 
 function updateAssignmentUi(textureIds: Array<number | undefined>, slots: Array<number | undefined>): void {
+  invalidateDragExport();
   new Set(textureIds.filter((id): id is number => id !== undefined)).forEach(updateTextureSlotBadge);
   new Set(slots.filter((slot): slot is number => slot !== undefined)).forEach(updateSlotCell);
   renderSlotSummary();
@@ -665,6 +678,8 @@ function updateButtonState(): void {
   $("#preview-button").hidden = Boolean(state.base);
   const baseInvalid = Boolean(state.base && (!state.preview || (state.textures.length && (!inferredGrid() || state.assignments.size !== state.textures.length))));
   ($("#export-button") as HTMLButtonElement).disabled = disabled || state.loadingTextures > 0 || state.loadingBase > 0 || baseInvalid || (state.textures.length === 0 && !state.base);
+  $("#drag-export-button").hidden = !state.preview;
+  ($("#drag-export-button") as HTMLButtonElement).disabled = ($("#export-button") as HTMLButtonElement).disabled;
   ($("#clear-background-button") as HTMLButtonElement).disabled = disabled || !state.settings.backgroundPath;
 }
 
@@ -724,35 +739,49 @@ async function generatePreview(): Promise<void> {
 }
 
 async function chooseTextures(): Promise<void> {
-  const revision = ++textureRequestRevision;
+  const revision = textureRequestRevision;
   const paths = await open({
     multiple: true,
     filters: [{ name: "贴图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
   if (!paths || revision !== textureRequestRevision) return;
   const selectedPaths = Array.isArray(paths) ? paths : [paths];
+  await queueTextureImport(selectedPaths);
+}
+
+function queueTextureImport(paths: string[]): Promise<void> {
+  if (state.busy) { toast("当前操作完成后再添加贴图", "info"); return Promise.resolve(); }
+  const supported = paths.filter((path) => textureExtensions.test(path));
+  if (!supported.length) { toast("请拖入支持的图片文件", "error"); return Promise.resolve(); }
+  if (supported.length !== paths.length) toast("已跳过非图片文件", "info");
+  const revision = textureRequestRevision;
   state.loadingTextures += 1;
   updateButtonState();
-  const finishActivity = beginBackgroundActivity(`后台加载 ${selectedPaths.length} 张贴图…`);
-  cancelTextureActivity = finishActivity;
-  try {
-    const response = await invoke<AddTexturesResponse>("add_textures", { paths: selectedPaths });
+  const job = textureImportQueue.then(async () => {
     if (revision !== textureRequestRevision) return;
-    state.textures.push(...response.textures);
-    if (response.textures.length) invalidatePreview();
-    renderTextures();
-    renderSlotSummary();
-    if (response.duplicateCount) toast(`已忽略 ${response.duplicateCount} 个重复文件`, "info");
-    if (response.errors.length) {
-      toast(response.errors.map((item) => `${item.path}: ${item.message}`).join("\n"), "error", 8000);
+    const finishActivity = beginBackgroundActivity(`加载 ${supported.length} 张贴图…`);
+    cancelTextureActivity = finishActivity;
+    try {
+      const response = await invoke<AddTexturesResponse>("add_textures", { paths: supported });
+      if (revision !== textureRequestRevision) return;
+      state.textures.push(...response.textures);
+      if (response.textures.length) invalidatePreview();
+      renderTextures();
+      renderSlotSummary();
+      if (response.duplicateCount) toast(`已忽略 ${response.duplicateCount} 个重复文件`, "info");
+      if (response.errors.length) {
+        toast(response.errors.map((item) => `${item.path}: ${item.message}`).join("\n"), "error", 8000);
+      }
+    } catch (error) {
+      if (revision === textureRequestRevision) toast(errorText(error), "error");
+    } finally {
+      if (revision === textureRequestRevision) state.loadingTextures = Math.max(0, state.loadingTextures - 1);
+      finishActivity();
+      updateButtonState();
     }
-  } catch (error) {
-    if (revision === textureRequestRevision) toast(errorText(error), "error");
-  } finally {
-    if (revision === textureRequestRevision) state.loadingTextures = 0;
-    finishActivity();
-    updateButtonState();
-  }
+  });
+  textureImportQueue = job.catch(() => {});
+  return job;
 }
 
 async function removeSelected(): Promise<void> {
@@ -778,6 +807,7 @@ async function removeSelected(): Promise<void> {
 async function clearTextures(): Promise<void> {
   if (state.busy) return;
   textureRequestRevision += 1;
+  textureImportQueue = Promise.resolve();
   cancelTextureActivity?.();
   try {
     await invoke("clear_textures");
@@ -794,13 +824,21 @@ async function clearTextures(): Promise<void> {
 }
 
 async function chooseBase(): Promise<void> {
-  const revision = ++baseRequestRevision;
+  const revision = baseRequestRevision;
   const path = await open({
     multiple: false,
     filters: [{ name: "底图文件", extensions: ["dds", "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp"] }],
   });
   if (!path || Array.isArray(path) || revision !== baseRequestRevision) return;
-  state.loadingBase += 1;
+  await importBasePath(path);
+}
+
+async function importBasePath(path: string): Promise<void> {
+  if (state.busy) { toast("当前操作完成后再替换底图", "info"); return; }
+  if (!textureExtensions.test(path)) { toast("请拖入支持的图片文件", "error"); return; }
+  const revision = ++baseRequestRevision;
+  cancelBaseActivity?.();
+  state.loadingBase = 1;
   updateButtonState();
   const finishActivity = beginBackgroundActivity("后台加载底图…");
   cancelBaseActivity = finishActivity;
@@ -846,6 +884,7 @@ function autoPlace(): void {
     return;
   }
   state.assignments.clear();
+  invalidateDragExport();
   state.textures.forEach((texture, index) => state.assignments.set(texture.id, index + 1));
   renderTextures();
   renderSlotSummary();
@@ -1022,7 +1061,188 @@ async function restoreBackground(): Promise<void> {
   }
 }
 
+function invalidateDragExport(): void {
+  exportRevision += 1;
+  exportPreparation = null;
+}
+
+function canDragExport(): boolean {
+  return !state.busy && !state.loadingTextures && !state.loadingBase && !nativeDragRunning &&
+    !($("#export-button") as HTMLButtonElement).disabled;
+}
+
+function prepareDragExport(): Promise<{ token: number; name: string }> {
+  if (exportPreparation?.revision === exportRevision) return exportPreparation.promise;
+  const revision = exportRevision;
+  const promise = invoke<{ token: number; name: string }>("prepare_drag_export", { request: {
+    format: state.settings.exportFormat, quality: state.settings.quality,
+    exportJson: state.settings.exportJson, options: buildOptions(),
+  } });
+  exportPreparation = { revision, promise };
+  void promise.catch(() => { if (exportPreparation?.promise === promise) exportPreparation = null; });
+  return promise;
+}
+
+async function beginExportDrag(): Promise<void> {
+  if (!canDragExport()) return;
+  const sourceGesture = pointerDrag;
+  if (!sourceGesture) return;
+  const gesture = ++exportGesture;
+  const revision = exportRevision;
+  let startedNative = false;
+  const finish = beginBackgroundActivity("准备拖出…");
+  try {
+    const prepared = await prepareDragExport();
+    if (revision !== exportRevision || gesture !== exportGesture) return;
+    if (pointerDrag !== sourceGesture) {
+      if (!pointerDrag) toast("文件已准备好，可再次拖出", "info");
+      return;
+    }
+    finish();
+    nativeDragRunning = true;
+    startedNative = true;
+    clearPointerDrag();
+    await invoke<boolean>("start_drag_export", { token: prepared.token });
+  } catch (error) {
+    if (revision === exportRevision) toast(errorText(error), "error");
+  } finally {
+    finish();
+    if (startedNative) { nativeDragRunning = false; clearFileDropHighlight(); }
+    if (pointerDrag === sourceGesture) clearPointerDrag();
+  }
+}
+
+function clearPointerDrag(): void {
+  if (pointerDrag) {
+    pointerDrag.source.classList.remove("dragging");
+    if (pointerDrag.source.hasPointerCapture(pointerDrag.pointerId)) pointerDrag.source.releasePointerCapture(pointerDrag.pointerId);
+  }
+  pointerDrag = null;
+  document.body.classList.remove("pointer-dragging");
+  document.querySelector("#pointer-drag-ghost")?.remove();
+  clearDragHighlight();
+}
+
+function wirePointerDragging(): void {
+  document.addEventListener("dragstart", (event) => event.preventDefault());
+  document.addEventListener("click", (event) => {
+    if (suppressDragClick) { suppressDragClick = false; event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  document.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || state.busy || nativeDragRunning || !settingsOverlay.hidden || modalRoot.firstElementChild) return;
+    suppressDragClick = false;
+    const target = event.target as HTMLElement;
+    const item = target.closest<HTMLElement>(".texture-item");
+    const cell = target.closest<HTMLElement>(".slot-cell");
+    const exportSource = target.closest<HTMLElement>("#drag-export-button, #export-button");
+    let action: ActiveDrag | { kind: "export" } | null = null;
+    let source: HTMLElement | null = null;
+    if (exportSource || (target.closest("#atlas-frame") && (!cell || event.altKey))) {
+      if (!canDragExport()) return;
+      action = { kind: "export" }; source = exportSource ?? atlasFrame;
+    } else if (item && state.preview?.grid) {
+      action = { kind: "texture", textureId: Number(item.dataset.id) }; source = item;
+    } else if (cell && state.preview?.grid) {
+      action = { kind: "slot", sourceSlot: Number(cell.dataset.slot) }; source = cell;
+    }
+    if (!source || !action) return;
+    pointerDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, source, action, moved: false };
+    source.setPointerCapture(event.pointerId);
+    if (exportSource?.id === "drag-export-button") void prepareDragExport().catch(() => {});
+  });
+  document.addEventListener("pointermove", (event) => {
+    const drag = pointerDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!(event.buttons & 1)) { clearPointerDrag(); return; }
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+    event.preventDefault();
+    if (!drag.moved) {
+      drag.moved = true;
+      suppressDragClick = true;
+      drag.source.classList.add("dragging");
+      document.body.classList.add("pointer-dragging");
+      if (drag.action.kind === "export") { void beginExportDrag(); return; }
+      const ghost = document.createElement("div");
+      ghost.id = "pointer-drag-ghost";
+      const action = drag.action;
+      const image = action.kind === "texture" ? state.textures.find((item) => item.id === action.textureId) : textureAtSlot(action.sourceSlot);
+      if (image) ghost.innerHTML = `<img src="${image.thumbnailDataUrl}" alt="" />`;
+      document.body.append(ghost);
+    }
+    if (drag.action.kind === "export") return;
+    // Crossing the window edge from the atlas exports the merged image; moves
+    // that stay inside the window still use the existing slot semantics.
+    if (drag.action.kind === "slot" && (event.clientX < 0 || event.clientY < 0 || event.clientX >= innerWidth || event.clientY >= innerHeight) && canDragExport()) {
+      drag.action = { kind: "export" };
+      void beginExportDrag(); return;
+    }
+    const ghost = document.querySelector<HTMLElement>("#pointer-drag-ghost");
+    if (ghost) ghost.style.transform = `translate(${event.clientX + 12}px, ${event.clientY + 12}px)`;
+    const slot = slotAtPointer(event);
+    if (!slot) { clearDragHighlight(); return; }
+    let hover = slotOverlay.querySelector<HTMLElement>(".slot-hover");
+    if (!hover) { hover = document.createElement("div"); hover.className = "slot-hover"; slotOverlay.append(hover); }
+    positionSlot(hover, slot);
+  });
+  document.addEventListener("pointerup", (event) => {
+    const drag = pointerDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const slot = slotAtPointer(event);
+    if (drag.moved && slot && drag.action.kind !== "export") {
+      if (drag.action.kind === "texture") assignTexture(drag.action.textureId, slot);
+      else moveSlot(drag.action.sourceSlot, slot);
+    }
+    clearPointerDrag();
+  });
+  document.addEventListener("pointercancel", () => { exportGesture += 1; clearPointerDrag(); });
+  window.addEventListener("blur", () => { if (!nativeDragRunning) { exportGesture += 1; clearPointerDrag(); } });
+  $("#drag-export-button").addEventListener("pointerenter", () => {
+    if (canDragExport()) void prepareDragExport().catch(() => {});
+  });
+}
+
+interface NativeFileDrop { paths?: string[]; position: { x: number; y: number } }
+
+function fileDropTarget(position: NativeFileDrop["position"]): HTMLElement | null {
+  if (state.busy || nativeDragRunning || pointerDrag || !settingsOverlay.hidden || modalRoot.firstElementChild) return null;
+  const element = document.elementFromPoint(position.x / devicePixelRatio, position.y / devicePixelRatio);
+  if (element?.closest("#base-drop-zone")) return $("#base-drop-zone");
+  if (element?.closest(".control-column")) return textureList;
+  if (element?.closest(".preview-column")) return previewStage;
+  return null;
+}
+
+function clearFileDropHighlight(): void {
+  document.querySelectorAll(".file-drop-target").forEach((element) => element.classList.remove("file-drop-target"));
+}
+
+async function wireNativeFileDrop(): Promise<void> {
+  const highlight = (payload: NativeFileDrop) => {
+    clearFileDropHighlight();
+    const target = fileDropTarget(payload.position);
+    if (target) {
+      target.dataset.dropLabel = target.id === "base-drop-zone" ? "设为底图" : "添加贴图";
+      target.classList.add("file-drop-target");
+    }
+  };
+  await Promise.all([
+    listen<NativeFileDrop>("tauri://drag-enter", ({ payload }) => highlight(payload)),
+    listen<NativeFileDrop>("tauri://drag-over", ({ payload }) => highlight(payload)),
+    listen("tauri://drag-leave", clearFileDropHighlight),
+    listen<NativeFileDrop>("tauri://drag-drop", ({ payload }) => {
+      const target = fileDropTarget(payload.position);
+      clearFileDropHighlight();
+      if (!target || !payload.paths?.length) return;
+      if (target.id === "base-drop-zone") {
+        if (payload.paths.length !== 1) { toast("底图请一次拖入一张", "error"); return; }
+        void importBasePath(payload.paths[0]);
+      } else void queueTextureImport(payload.paths);
+    }),
+  ]);
+}
+
 function wireEvents(): void {
+  wirePointerDragging();
   window.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
@@ -1057,74 +1277,12 @@ function wireEvents(): void {
     }
     renderTextures();
   });
-  textureList.addEventListener("dragstart", (event) => {
-    if (state.busy || !state.preview?.grid) { event.preventDefault(); return; }
-    const item = (event.target as HTMLElement).closest<HTMLElement>(".texture-item");
-    if (!item || !event.dataTransfer) return;
-    const textureId = Number(item.dataset.id);
-    if (!textureId) return;
-    activeDrag = { kind: "texture", textureId };
-    item.classList.add("dragging");
-    event.dataTransfer.setData("application/x-ptam-texture", String(textureId));
-    event.dataTransfer.setData("text/plain", `ptam-texture:${textureId}`);
-    event.dataTransfer.effectAllowed = "move";
-  });
-  textureList.addEventListener("dragend", (event) => {
-    (event.target as HTMLElement).closest<HTMLElement>(".texture-item")?.classList.remove("dragging");
-    activeDrag = null;
-    clearDragHighlight();
-  });
-  slotOverlay.addEventListener("dragstart", (event) => {
-    if (state.busy) { event.preventDefault(); return; }
-    const cell = (event.target as HTMLElement).closest<HTMLElement>(".slot-cell.occupied");
-    if (!cell || !event.dataTransfer) return;
-    const sourceSlot = Number(cell.dataset.slot);
-    if (!sourceSlot) return;
-    activeDrag = { kind: "slot", sourceSlot };
-    cell.classList.add("dragging");
-    event.dataTransfer.setData("application/x-ptam-slot", String(sourceSlot));
-    event.dataTransfer.setData("text/plain", `ptam-slot:${sourceSlot}`);
-    event.dataTransfer.effectAllowed = "move";
-  });
-  slotOverlay.addEventListener("dragend", (event) => {
-    (event.target as HTMLElement).closest<HTMLElement>(".slot-cell")?.classList.remove("dragging");
-    activeDrag = null;
-    clearDragHighlight();
-  });
-  slotOverlay.addEventListener("dragover", (event) => {
-    const slot = slotAtPointer(event);
-    if (!slot || !activeDrag) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    let hover = slotOverlay.querySelector<HTMLElement>(".slot-hover");
-    if (!hover) { hover = document.createElement("div"); hover.className = "slot-hover"; slotOverlay.append(hover); }
-    positionSlot(hover, slot);
-  });
-  slotOverlay.addEventListener("dragleave", (event) => {
-    if (!slotOverlay.contains(event.relatedTarget as Node | null)) clearDragHighlight();
-  });
-  slotOverlay.addEventListener("drop", (event) => {
-    const targetSlot = slotAtPointer(event);
-    if (!targetSlot || !event.dataTransfer) return;
-    event.preventDefault();
-    clearDragHighlight();
-    let textureId = Number(event.dataTransfer.getData("application/x-ptam-texture"));
-    let sourceSlot = Number(event.dataTransfer.getData("application/x-ptam-slot"));
-    const plain = event.dataTransfer.getData("text/plain");
-    if (!textureId && plain.startsWith("ptam-texture:")) textureId = Number(plain.slice(13));
-    if (!sourceSlot && plain.startsWith("ptam-slot:")) sourceSlot = Number(plain.slice(10));
-    if (!textureId && activeDrag?.kind === "texture") textureId = activeDrag.textureId;
-    if (!sourceSlot && activeDrag?.kind === "slot") sourceSlot = activeDrag.sourceSlot;
-    activeDrag = null;
-    if (textureId) assignTexture(textureId, targetSlot);
-    else if (sourceSlot) moveSlot(sourceSlot, targetSlot);
-  });
-
   const bindSetting = (selector: string, apply: (element: HTMLInputElement | HTMLSelectElement) => void, affectsLayout = true) => {
     $(selector).addEventListener("change", (event) => {
       apply(event.target as HTMLInputElement | HTMLSelectElement);
       persistSettings();
       updateConditionalSettings();
+      invalidateDragExport();
       if (affectsLayout) invalidatePreview();
     });
   };
@@ -1162,6 +1320,8 @@ function wireEvents(): void {
       }
     }
     if (event.key === "Escape") {
+      exportGesture += 1;
+      clearPointerDrag();
       if (modalRoot.firstElementChild) closeModal();
       else if (!settingsOverlay.hidden) closeSettings();
     }
@@ -1175,6 +1335,7 @@ function wireEvents(): void {
 async function initialize(): Promise<void> {
   applySettingsToUi();
   wireEvents();
+  try { await wireNativeFileDrop(); } catch (error) { toast(`文件拖入不可用：${errorText(error)}`, "error"); }
   try {
     const project = await invoke<ProjectStateResponse>("get_project_state");
     state.textures = project.textures;

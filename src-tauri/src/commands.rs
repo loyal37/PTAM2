@@ -155,6 +155,9 @@ pub async fn add_textures(
                 }),
             }
         }
+        if !textures.is_empty() {
+            store.revision += 1;
+        }
         Ok::<_, AppError>(AddTexturesResponse {
             textures,
             errors,
@@ -171,6 +174,7 @@ pub fn remove_textures(ids: Vec<u64>, state: State<'_, AppState>) -> Result<(), 
     let ids: HashSet<u64> = ids.into_iter().collect();
     let mut store = state.0.write().map_err(|_| message(AppError::State))?;
     store.textures.retain(|texture| !ids.contains(&texture.id));
+    store.revision += 1;
     Ok(())
 }
 
@@ -179,6 +183,7 @@ pub fn clear_textures(state: State<'_, AppState>) -> Result<(), String> {
     let mut store = state.0.write().map_err(|_| message(AppError::State))?;
     store.textures_epoch += 1;
     store.textures.clear();
+    store.revision += 1;
     Ok(())
 }
 
@@ -192,6 +197,7 @@ pub async fn resize_textures(
     tauri::async_runtime::spawn_blocking(move || {
         crate::models::validate_canvas(width, height)?;
         let mut store = state.0.write().map_err(|_| AppError::State)?;
+        store.revision += 1;
         for texture in &mut store.textures {
             if texture.image.dimensions() != (width, height) {
                 texture.image = image::imageops::resize(
@@ -295,7 +301,10 @@ pub async fn export_atlas(
         .map_err(message)
 }
 
-fn export_project(project: ProjectSnapshot, request: ExportRequest) -> AppResult<ExportReport> {
+pub(crate) fn export_project(
+    project: ProjectSnapshot,
+    request: ExportRequest,
+) -> AppResult<ExportReport> {
     let started = Instant::now();
     let quality = parse_quality(&request.quality)?;
     let build = build_atlas(&project, &request.options, true)?;

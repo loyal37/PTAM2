@@ -40,15 +40,30 @@ const executablePath = process.env.PTAM_BROWSER_PATH || (fs.existsSync(chrome) ?
       const base = { id: 99, name: 'base.png', path: 'C:/fixture/base.png', width: mode === 'dense' ? 8192 : 512,
         height: mode === 'dense' ? 8192 : 256, format: 'PNG', thumbnailDataUrl: image('#ff0000') };
       window.calls = [];
-      window.__TAURI_INTERNALS__ = { invoke: async (cmd, args) => {
+      let nextId = 3;
+      const callbacks = new Map();
+      const listeners = new Map();
+      window.emitNativeDrop = (event, payload) => {
+        const id = listeners.get(`tauri://${event}`);
+        callbacks.get(id)?.({ event: `tauri://${event}`, id, payload });
+      };
+      window.__TAURI_INTERNALS__ = { transformCallback: callback => {
+        const id = callbacks.size + 1;
+        callbacks.set(id, callback);
+        return id;
+      }, invoke: async (cmd, args) => {
         window.calls.push({ cmd, args });
+        if (cmd === 'plugin:event|listen') { listeners.set(args.event, args.handler); return args.handler; }
+        if (cmd === 'plugin:event|unlisten') return;
         if (cmd === 'get_project_state') return { textures, base: ['plain', 'background'].includes(mode) ? null : base };
         if (cmd === 'remove_textures') { if (window.delayRemove) await new Promise(resolve => window.finishRemove = resolve); return; }
         if (cmd === 'clear_textures' || cmd === 'clear_base_texture') return;
         if (cmd === 'plugin:dialog|open') return args.options.multiple ? ['C:/fixture/new.png'] : 'C:/fixture/new-base.png';
         if (cmd === 'plugin:dialog|save') return 'C:/fixture/atlas.png';
         if (cmd === 'set_base_texture') { await new Promise(resolve => window.finishBase = resolve); return { ...base, id: 100, name: 'new-base.png' }; }
-        if (cmd === 'add_textures') { await new Promise(resolve => window.finishAdd = resolve); return { textures: [{ ...textures[0], id: 3 }], errors: [], duplicateCount: 0 }; }
+        if (cmd === 'add_textures') { if (!window.autoImport) await new Promise(resolve => window.finishAdd = resolve); return { textures: args.paths.map(name => ({ ...textures[0], name, id: nextId++ })), errors: [], duplicateCount: 0 }; }
+        if (cmd === 'prepare_drag_export') { if (window.delayPrepare) await new Promise(resolve => window.finishPrepare = resolve); return { token: 42, name: 'atlas.png' }; }
+        if (cmd === 'start_drag_export') return window.dragResult ?? true;
         if (cmd === 'read_background_image') throw 'offline';
         if (cmd === 'build_preview') {
           if (window.delayPreview) await new Promise(resolve => window.finishPreview = resolve);
@@ -70,6 +85,18 @@ const executablePath = process.env.PTAM_BROWSER_PATH || (fs.existsSync(chrome) ?
   }
   const tick = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const pixels = (page, x, y) => page.locator('#preview-image').evaluate((canvas, { x, y }) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data), { x, y });
+  const fileDrop = async (page, selector, paths, event = 'drag-drop') => {
+    const box = await page.locator(selector).boundingBox();
+    await page.evaluate(({ box, paths, event }) => window.emitNativeDrop(event, {
+      paths, position: { x: (box.x + box.width / 2) * devicePixelRatio, y: (box.y + box.height / 2) * devicePixelRatio },
+    }), { box, paths, event });
+  };
+  const startExportGesture = async (page, selector = '#drag-export-button') => {
+    const box = await page.locator(selector).boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 20, box.y + box.height / 2, { steps: 3 });
+  };
   try {
     await run('gear stays at the right edge while loading', 'base', async p => {
       const before = await p.locator('#settings-button').boundingBox();
@@ -129,7 +156,7 @@ const executablePath = process.env.PTAM_BROWSER_PATH || (fs.existsSync(chrome) ?
       assert.ok(Math.abs(grid.width / frame.width - 0.5) < 0.01);
       assert.equal(await p.locator('#preview-button').isVisible(), false);
     });
-    await run('native HTML drag into an empty slot and swap occupied slots', 'base', async p => {
+    await run('pointer drag into an empty slot and swap occupied slots', 'base', async p => {
       const overlay = p.locator('#slot-overlay');
       const box = await overlay.boundingBox();
       await p.locator('.texture-item[data-id="1"]').dragTo(overlay, { targetPosition: { x: box.width * .25, y: box.height * .5 } });
@@ -157,6 +184,112 @@ const executablePath = process.env.PTAM_BROWSER_PATH || (fs.existsSync(chrome) ?
       await tick(p);
       assert.equal(await p.locator('.texture-item').count(), 0);
       assert.equal(await p.locator('#add-button').isEnabled(), true);
+    });
+    await run('native file drop highlights only the target and imports supported files', 'plain', async p => {
+      await p.evaluate(() => window.autoImport = true);
+      await fileDrop(p, '#texture-list', ['C:/fixture/a.PNG'], 'drag-enter');
+      assert.equal(await p.locator('#texture-list.file-drop-target').count(), 1);
+      await p.evaluate(() => window.emitNativeDrop('drag-leave', {}));
+      assert.equal(await p.locator('.file-drop-target').count(), 0);
+      await fileDrop(p, '#texture-list', ['C:/fixture/a.PNG', 'C:/fixture/b.dds', 'C:/fixture/not-texture.txt']);
+      await p.waitForFunction(() => document.querySelectorAll('.texture-item').length === 4);
+      const request = await p.evaluate(() => window.calls.find(c => c.cmd === 'add_textures'));
+      assert.deepEqual(request.args.paths, ['C:/fixture/a.PNG', 'C:/fixture/b.dds']);
+      assert.equal(await p.locator('.file-drop-target').count(), 0);
+    });
+    await run('consecutive native file drops queue without losing either batch', 'plain', async p => {
+      await fileDrop(p, '#preview-stage', ['C:/fixture/a.png']);
+      await p.waitForFunction(() => !!window.finishAdd);
+      await fileDrop(p, '#texture-list', ['C:/fixture/b.png']);
+      assert.equal(await p.evaluate(() => window.calls.filter(c => c.cmd === 'add_textures').length), 1);
+      await p.evaluate(() => { window.finishAdd(); window.finishAdd = null; });
+      await p.waitForFunction(() => !!window.finishAdd);
+      await p.evaluate(() => window.finishAdd());
+      await p.waitForFunction(() => document.querySelectorAll('.texture-item').length === 4);
+      assert.equal(await p.locator('#settings-button').isEnabled(), true);
+    });
+    await run('base drop uses the base loader and rejects ambiguous multiple bases', 'base', async p => {
+      await fileDrop(p, '#base-card', ['C:/fixture/a.png', 'C:/fixture/b.png']);
+      assert.equal(await p.evaluate(() => window.calls.filter(c => c.cmd === 'set_base_texture').length), 0);
+      await fileDrop(p, '#base-card', ['C:/fixture/new-base.dds']);
+      await p.waitForFunction(() => !!window.finishBase);
+      await p.evaluate(() => window.finishBase());
+      await p.waitForFunction(() => document.querySelector('#base-card').textContent.includes('new-base.png'));
+      assert.equal(await p.evaluate(() => window.calls.filter(c => c.cmd === 'add_textures').length), 0);
+    });
+    await run('native drag out honors export settings without a save dialog', 'plain', async p => {
+      await p.locator('#preview-button').click();
+      await p.locator('#drag-export-button').waitFor();
+      await p.locator('#settings-button').click();
+      await p.locator('#export-format').selectOption('bc7-srgb');
+      await p.locator('#export-json').check();
+      await p.keyboard.press('Escape');
+      await startExportGesture(p);
+      await p.waitForFunction(() => window.calls.some(c => c.cmd === 'start_drag_export'));
+      await p.mouse.up();
+      const request = await p.evaluate(() => window.calls.filter(c => c.cmd === 'prepare_drag_export').at(-1).args.request);
+      assert.equal(request.format, 'bc7-srgb');
+      assert.equal(request.exportJson, true);
+      assert.equal(await p.evaluate(() => window.calls.some(c => c.cmd === 'plugin:dialog|save')), false);
+    });
+    await run('ordinary preview itself can be dragged out', 'plain', async p => {
+      await p.locator('#preview-button').click();
+      await p.locator('#atlas-frame').waitFor();
+      await startExportGesture(p, '#preview-image');
+      await p.waitForFunction(() => window.calls.some(c => c.cmd === 'start_drag_export'));
+      await p.mouse.up();
+    });
+    await run('releasing during slow preparation never starts a late native drag', 'base', async p => {
+      await p.locator('#auto-place-button').click();
+      await p.evaluate(() => window.delayPrepare = true);
+      await startExportGesture(p);
+      await p.waitForFunction(() => !!window.finishPrepare);
+      await p.mouse.up();
+      await p.evaluate(() => window.finishPrepare());
+      await tick(p);
+      assert.equal(await p.evaluate(() => window.calls.some(c => c.cmd === 'start_drag_export')), false);
+      assert.equal(await p.locator('#engine-activity').isVisible(), false);
+      await startExportGesture(p);
+      await p.waitForFunction(() => window.calls.some(c => c.cmd === 'start_drag_export'));
+      await p.mouse.up();
+    });
+    await run('Escape cancels a preparing drag without a late native drag', 'base', async p => {
+      await p.locator('#auto-place-button').click();
+      await p.evaluate(() => window.delayPrepare = true);
+      await startExportGesture(p);
+      await p.waitForFunction(() => !!window.finishPrepare);
+      await p.keyboard.press('Escape');
+      await p.evaluate(() => window.finishPrepare());
+      await p.mouse.up();
+      await tick(p);
+      assert.equal(await p.evaluate(() => window.calls.some(c => c.cmd === 'start_drag_export')), false);
+    });
+    await run('late preparation cannot hijack a newer slot gesture', 'base', async p => {
+      await p.locator('#auto-place-button').click();
+      await p.evaluate(() => window.delayPrepare = true);
+      await startExportGesture(p);
+      await p.waitForFunction(() => !!window.finishPrepare);
+      await p.mouse.up();
+      const first = await p.locator('.slot-cell[data-slot="1"]').boundingBox();
+      const second = await p.locator('.slot-cell[data-slot="2"]').boundingBox();
+      await p.mouse.move(first.x + first.width / 2, first.y + first.height / 2);
+      await p.mouse.down();
+      await p.evaluate(() => window.finishPrepare());
+      await tick(p);
+      await p.mouse.move(second.x + second.width / 2, second.y + second.height / 2, {steps: 4});
+      await p.mouse.up();
+      assert.equal(await p.evaluate(() => window.calls.some(c => c.cmd === 'start_drag_export')), false);
+      assert.equal(await p.locator('.slot-cell[data-slot="2"]').getAttribute('title'), 'texture-1.png');
+    });
+    await run('dragging an occupied slot outside the window exports the atlas', 'base', async p => {
+      await p.locator('#auto-place-button').click();
+      const box = await p.locator('.slot-cell[data-slot="1"]').boundingBox();
+      await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await p.mouse.down();
+      await p.mouse.move(-10, box.y + box.height / 2, {steps: 5});
+      await p.waitForFunction(() => window.calls.some(c => c.cmd === 'start_drag_export'));
+      await p.mouse.up();
+      assert.equal(await p.locator('.slot-cell[data-slot="1"]').getAttribute('title'), 'texture-1.png');
     });
     await run('export-only settings preserve preview and survive reload', 'plain', async p => {
       await p.locator('#preview-button').click();

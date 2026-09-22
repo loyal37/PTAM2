@@ -41,6 +41,7 @@ pub struct ProjectSnapshot {
 
 #[derive(Default)]
 pub struct TextureStore {
+    pub revision: u64,
     pub next_id: u64,
     pub textures: Vec<TextureAsset>,
     pub base: Option<TextureAsset>,
@@ -50,6 +51,7 @@ pub struct TextureStore {
 
 impl TextureStore {
     pub fn clear_base(&mut self) {
+        self.revision += 1;
         self.base_revision += 1;
         self.base = None;
     }
@@ -59,6 +61,7 @@ impl TextureStore {
             return false;
         }
         self.base = Some(asset);
+        self.revision += 1;
         true
     }
 }
@@ -93,14 +96,14 @@ pub struct AddTexturesResponse {
     pub duplicate_count: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotAssignment {
     pub texture_id: u64,
     pub slot: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildOptions {
     pub layout_mode: String,
